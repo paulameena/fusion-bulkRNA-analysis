@@ -1,0 +1,789 @@
+---
+title: "updated_rnaseq_nov2024"
+author: "Paulameena Shultes"
+date: "2024-11-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(data.table)
+library(dplyr)
+library(limma)
+library(edgeR)
+library(tximport)
+library(biomaRt)
+library(DESeq2)
+library(org.Hs.eg.db)
+library(ggplot2)
+library(scales)
+library(viridis)
+library(ggdendro)
+library(gridExtra)
+```
+
+```{r, arda_stuff}
+# # This script is used to clean, filter, normalize and run DEG
+# # analysis on the gene count data
+# 
+# setwd('/mnt/pan/SOM_CCCC_JGS25/durmaza/bulkrnaseq_fusion/RNASeq_Analysis/')
+# 
+# f_list <- list.files(path='RNA_SEQ/', pattern = 'quant.sf', recursive = TRUE, full.names = TRUE)
+# tx2_gene <- fread('/mnt/pan/SOM_CCCC_JGS25/durmaza/resources/grch38_gencodev42_tx2gene.tsv', header=FALSE, sep='\t') %>%
+#   filter(V1!='') %>%
+#   distinct(V1, V2, V3)
+# 
+# 
+# #### Check Abundance estimates ####
+# count_res <- tximport(f_list, 
+#                       type = 'salmon', 
+#                       txIn = TRUE, 
+#                       txOut = FALSE, 
+#                       countsFromAbundance = 'scaledTPM', 
+#                       tx2gene = data.frame('transcript_id'=tx2_gene$V2,
+#                                            'gene_id'=tx2_gene$V1),
+#                       infRepStat = matrixStats::rowMedians)
+
+count_mat <- read.csv("./rna_2_counts (1).csv")
+obs_ft <- read.csv("./obs_ft (1).csv")
+obs_ft <-  subset(obs_ft, select = -c(X) )
+rownames(count_mat) <- count_mat$X
+count_mat = subset(count_mat, select = -c(X) )
+f_list <- read.csv("./f_list.csv")
+tx2_gene <- read.csv("./tx2_gene (1).csv")
+tx2_gene = subset(tx2_gene, select = -c(X) )
+#colnames(count_mat) <- basename(gsub(pattern='/quant.sf', replacement = '', f_list))
+
+# Check Abundance #
+#tx2_gene <- tx2_gene[match(rownames(count_mat), table=tx2_gene$V1),]
+
+require(pheatmap)
+pheatmap(sapply(unique(tx2_gene$V3), function(s){
+  local_mapp <- subset(tx2_gene, tx2_gene$V3 == s)
+  local_count_mat <- count_mat[which(rownames(count_mat) %in% local_mapp$V1),,drop=FALSE]
+  log10(colSums(local_count_mat)+1)
+}))
+
+#count_mat <- count_mat[which(rownames(count_mat) %in% tx2_gene$V1[which(tx2_gene$V4 %in% c('protein_coding', 'lncRNA'))]),]
+count_mat <- count_mat[which(rownames(count_mat) %in% tx2_gene$V1[which(tx2_gene$V3 %in% c('protein_coding', 'lncRNA', 'snRNA', 'snoRNA', 'miRNA'))]),]
+
+design_mat <- model.matrix(~0+obs_ft$tag)
+dge <- DGEList(counts = count_mat)
+dge <- dge[filterByExpr(dge, design=design_mat),]
+dge <- calcNormFactors(dge, method='TMM', logratioTrim = 0.15, sumTrim = 0.025)
+
+dge <- estimateGLMRobustDisp(dge, design=design_mat)
+fit_res <- glmQLFit(dge, design_mat) #switched to qlfit to be less permissive
+test_res_all = glmQLFTest(fit_res)
+test_res_all_tab = topTags(test_res_all, n=Inf, adjust.method = 'BY', sort.by = 'none')$table #updated correction
+test_res_all_tab$symbol <- tx2_gene$V3[match(rownames(test_res_all_tab), table=tx2_gene$V1)]
+
+test_res <- glmQLFTest(fit_res, contrast = c(0,-1,1))
+test_res_tab <- topTags(test_res, n=Inf, adjust.method = 'fdr', sort.by = 'none')$table
+test_res_tab$symbol <- tx2_gene$V3[match(rownames(test_res_tab), table=tx2_gene$V1)]
+hist(test_res_tab$PValue)
+plot(test_res_tab$logFC, -log10(test_res_tab$FDR))
+
+test_res_tab$symbol
+View(test_res_tab)
+
+```
+
+```{r, dge_cont}
+
+rvp_tab = test_res_tab
+fvp = glmQLFTest(fit_res, contrast = c(1,-1,0))
+fvp_tab <- topTags(fvp, n=Inf, adjust.method = 'fdr', sort.by = 'none')$table
+hist(fvp_tab$PValue)
+fvr = glmQLFTest(fit_res, contrast = c(1,0,-1))
+fvr_tab = topTags(fvr, n=Inf, adjust.method = 'fdr', sort.by = 'none')$table
+hist(fvr_tab$PValue)
+
+#add gene names
+temp = rownames(fvr_tab)
+fvr_tab = fvr_tab %>%
+  mutate(ensembl = sapply(strsplit(as.character(temp), "\\."), `[[`, 1))
+gene_annots <- AnnotationDbi:: select(org.Hs.eg.db, keys=fvr_tab$ensembl, 
+                columns="SYMBOL", keytype="ENSEMBL", multiVals="first")
+fvr_tab = merge.data.frame(fvr_tab, gene_annots, by.x = "ensembl", by.y="ENSEMBL")
+
+temp = rownames(fvp_tab)
+fvp_tab = fvp_tab %>%
+  mutate(ensembl = sapply(strsplit(as.character(temp), "\\."), `[[`, 1))
+gene_annots <- AnnotationDbi:: select(org.Hs.eg.db, keys=fvp_tab$ensembl, 
+                columns="SYMBOL", keytype="ENSEMBL", multiVals="first")
+fvp_tab = merge.data.frame(fvp_tab, gene_annots, by.x = "ensembl", by.y="ENSEMBL")
+
+temp = rownames(rvp_tab)
+rvp_tab = rvp_tab %>%
+  mutate(ensembl = sapply(strsplit(as.character(temp), "\\."), `[[`, 1))
+gene_annots <- AnnotationDbi:: select(org.Hs.eg.db, keys=rvp_tab$ensembl, 
+                columns="SYMBOL", keytype="ENSEMBL", multiVals="first")
+rvp_tab = merge.data.frame(rvp_tab, gene_annots, by.x = "ensembl", by.y="ENSEMBL")
+
+#set a boolean column for significance
+fvr_tab$significant = ifelse(fvr_tab$PValue < .05, "Significant", NA) 
+fvp_tab$significant = ifelse(fvp_tab$PValue < .05, "Significant", NA)
+rvp_tab$significant = ifelse(rvp_tab$PValue < .05, "Significant", NA)
+
+#get lists of sig genes
+fvr_tab_siggenes = fvr_tab %>% filter(significant == "Significant") 
+fvp_tab_siggenes = fvp_tab %>% filter(significant == "Significant") 
+rvp_tab_siggenes = rvp_tab %>% filter(significant == "Significant") 
+
+fvr_tab_siggenes
+fvp_tab_siggenes
+rvp_tab_siggenes
+```
+
+
+
+```{r, gene_enrichment}
+library(tidyverse)
+library(clusterProfiler)
+
+#add geneID
+fvp_tab_siggenes$Entrez = mapIds(org.Hs.eg.db, keys = fvp_tab_siggenes$ensembl, keytype = 'ENSEMBL', column = 'ENTREZID', multiVals = "first")
+fvr_tab_siggenes$Entrez = mapIds(org.Hs.eg.db, keys = fvr_tab_siggenes$ensembl, keytype = 'ENSEMBL', column = 'ENTREZID', multiVals = "first")
+rvp_tab_siggenes$Entrez = mapIds(org.Hs.eg.db, keys = rvp_tab_siggenes$ensembl, keytype = 'ENSEMBL', column = 'ENTREZID', multiVals = "first")
+
+#search KEGG
+keggRes_fusedvparental <- enrichKEGG(gene = fvp_tab_siggenes$Entrez, organism = 'hsa')
+keggRes_fusedvresistant <- enrichKEGG(gene = fvr_tab_siggenes$Entrez, organism = 'hsa')
+keggRes_rvp <- enrichKEGG(gene = rvp_tab_siggenes$Entrez, organism = 'hsa')
+
+#show results as tibbles
+keggRes_fvp_tibble = as_tibble(keggRes_fusedvparental)
+keggRes_fvr_tibble= as_tibble(keggRes_fusedvresistant)
+keggRes_rvp_tibble = as_tibble(keggRes_rvp)
+
+print(keggRes_fvp_tibble)
+print(keggRes_fvr_tibble)
+print(keggRes_rvp_tibble)
+```
+
+
+#Gene ontology analysis
+clusterProfiler can also perform over-representation analysis on GO terms using the command enrichGO
+##fused vs parental
+```{r calculate_fvp_GO}
+#fused vs parental first, in all 3 categories
+universe = fvp_tab$ensembl
+
+ego_fvp_BP <- enrichGO(gene = fvp_tab_siggenes$ensembl, 
+                universe = universe,
+                OrgDb = org.Hs.eg.db,
+                keyType = "ENSEMBL",
+                ont = "BP",
+                pvalueCutoff= 0.05,
+                readable= TRUE)
+
+ego_fvp_CC <- enrichGO(gene = fvp_tab_siggenes$ensembl, 
+                universe = universe,
+                OrgDb = org.Hs.eg.db,
+                keyType = "ENSEMBL",
+                ont = "CC",
+                pvalueCutoff= 0.05,
+                readable= TRUE)
+
+
+ego_fvp_MF <- enrichGO(gene = fvp_tab_siggenes$ensembl, 
+                universe = universe,
+                OrgDb = org.Hs.eg.db,
+                keyType = "ENSEMBL",
+                ont = "MF",
+                pvalueCutoff= 0.05,
+                readable= TRUE)
+
+```
+
+```{r plot_fvp_GO, fig.width=6, fig.height=5}
+barplot(ego_fvp_BP, showCategory=10, title= "fused vs parental biological processes")
+barplot(ego_fvp_CC, showCategory=10, title= "fused vs parental cellular components")
+barplot(ego_fvp_MF, showCategory=10, title = "fused vs parental metabolic functions")
+```
+## fused vs resistant
+```{r calculate_fvr_GO}
+#fused vs parental first, in all 3 categories
+universe = fvr_tab$ensembl
+
+ego_fvr_BP <- enrichGO(gene = fvr_tab_siggenes$ensembl, 
+                universe = universe,
+                OrgDb = org.Hs.eg.db,
+                keyType = "ENSEMBL",
+                ont = "BP",
+                pvalueCutoff= 0.05,
+                readable= TRUE)
+
+ego_fvr_CC <- enrichGO(gene = fvr_tab_siggenes$ensembl, 
+                universe = universe,
+                OrgDb = org.Hs.eg.db,
+                keyType = "ENSEMBL",
+                ont = "CC",
+                pvalueCutoff= 0.05,
+                readable= TRUE)
+
+
+ego_fvr_MF <- enrichGO(gene = fvr_tab_siggenes$ensembl, 
+                universe = universe,
+                OrgDb = org.Hs.eg.db,
+                keyType = "ENSEMBL",
+                ont = "MF",
+                pvalueCutoff= 0.05,
+                readable= TRUE)
+
+```
+
+```{r plot_fvr_GO, fig.width=6, fig.height=5}
+barplot(ego_fvr_BP, showCategory=10, title="fused vs resistant biological processes")
+barplot(ego_fvr_CC, showCategory=10, title= "fused vs resistant cellular components")
+barplot(ego_fvr_MF, showCategory=20, title="fused vs resistant metabolic functions") #no results
+```
+
+## resistant vs parental
+```{r calculate_rvp_GO}
+#fused vs parental first, in all 3 categories
+universe = rvp_tab$ensembl
+
+ego_rvp_BP <- enrichGO(gene = rvp_tab_siggenes$ensembl, 
+                universe = universe,
+                OrgDb = org.Hs.eg.db,
+                keyType = "ENSEMBL",
+                ont = "BP",
+                pvalueCutoff= 0.05,
+                readable= TRUE)
+
+ego_rvp_CC <- enrichGO(gene = rvp_tab_siggenes$ensembl, 
+                universe = universe,
+                OrgDb = org.Hs.eg.db,
+                keyType = "ENSEMBL",
+                ont = "CC",
+                pvalueCutoff= 0.05,
+                readable= TRUE)
+
+
+ego_rvp_MF <- enrichGO(gene = rvp_tab_siggenes$ensembl, 
+                universe = universe,
+                OrgDb = org.Hs.eg.db,
+                keyType = "ENSEMBL",
+                ont = "MF",
+                pvalueCutoff= 0.05,
+                readable= TRUE)
+
+```
+
+```{r plot_fvr_GO, fig.width=6, fig.height=5}
+barplot(ego_rvp_BP, showCategory=10, title="resistant vs parental biological processes")
+barplot(ego_rvp_CC, showCategory=10, title= "reistant vs parental cellular components")
+barplot(ego_rvp_MF, showCategory=10, title="resistant vs parental metabolic functions")
+```
+
+# GSEA analysis
+
+```{r, load_library_for_Gsea}
+library(msigdbr)
+
+```
+
+## rank gene sets by logFC
+```{r, rank_genesets}
+fvr_tab = fvr_tab %>% mutate(GeneID = fvr_tab$ensembl) 
+rankedGenes_fvr <- fvr_tab %>%
+  filter(!is.na(GeneID)) %>%
+  mutate(rank = logFC) %>%
+  arrange(desc(rank)) %>%
+  pull(rank, GeneID)
+
+fvp_tab = fvp_tab %>% mutate(GeneID = fvp_tab$ensembl) 
+rankedGenes_fvp <- fvp_tab %>%
+  filter(!is.na(GeneID)) %>%
+  mutate(rank = logFC) %>%
+  arrange(desc(rank)) %>%
+  pull(rank, GeneID)
+
+rvp_tab = rvp_tab %>% mutate(GeneID = rvp_tab$ensembl) 
+rankedGenes_rvp <- rvp_tab %>%
+  filter(!is.na(GeneID)) %>%
+  mutate(rank = logFC) %>%
+  arrange(desc(rank)) %>%
+  pull(rank, GeneID)
+```
+
+## load pathways
+```{r}
+term2gene <- msigdbr(species = "Homo sapiens", category = "H") %>% 
+  dplyr::select(gs_name, ensembl_gene)
+term2name <- msigdbr(species = "Homo sapiens", category = "H") %>% 
+  dplyr::select(gs_name, gs_description) %>% 
+  distinct()
+
+```
+
+## perform GSEA analysis
+```{r, run_GSEA analysis}
+gseaRes_fvr <- GSEA(rankedGenes_fvr,
+                TERM2GENE = term2gene,
+                TERM2NAME = term2name,
+                pvalueCutoff = 1.00, 
+                minGSSize = 15,
+                maxGSSize = 500)
+
+gseaRes_fvp <- GSEA(rankedGenes_fvp,
+                TERM2GENE = term2gene,
+                TERM2NAME = term2name,
+                pvalueCutoff = 1.00, 
+                minGSSize = 15,
+                maxGSSize = 500)
+
+gseaRes_rvp <- GSEA(rankedGenes_rvp,
+                TERM2GENE = term2gene,
+                TERM2NAME = term2name,
+                pvalueCutoff = 1.00, 
+                minGSSize = 15,
+                maxGSSize = 500)
+
+#redo using GO BP as pathways (fgsea)
+```
+
+```{r, examine_top_10_results_for_each}
+fusedvsresistant_GSEA = as_tibble(gseaRes_fvr) %>% 
+  arrange(desc(abs(NES))) %>% 
+  top_n(10, wt=-p.adjust) %>% 
+  dplyr::select(-core_enrichment) %>%
+  mutate(across(c("enrichmentScore", "NES"), round, digits=3)) %>% 
+  mutate(across(c("pvalue", "p.adjust", "qvalue"), scales::scientific))
+
+fusedvsparental_GSEA = as_tibble(gseaRes_fvp) %>% 
+  arrange(desc(abs(NES))) %>% 
+  top_n(10, wt=-p.adjust) %>% 
+  dplyr::select(-core_enrichment) %>%
+  mutate(across(c("enrichmentScore", "NES"), round, digits=3)) %>% 
+  mutate(across(c("pvalue", "p.adjust", "qvalue"), scales::scientific))
+
+resistantvsparental_GSEA= as_tibble(gseaRes_rvp) %>% 
+  arrange(desc(abs(NES))) %>% 
+  top_n(10, wt=-p.adjust) %>% 
+  dplyr::select(-core_enrichment) %>%
+  mutate(across(c("enrichmentScore", "NES"), round, digits=3)) %>% 
+  mutate(across(c("pvalue", "p.adjust", "qvalue"), scales::scientific))
+
+#unique fused gene set enrichment results
+fused1 = gseaRes_fvp@result$Description
+fused2 = gseaRes_fvr@result$Description
+minus = gseaRes_rvp@result$Description
+print(fused1)
+print(fused2)
+print(minus)
+
+gsea_of_interest = intersect(fused1, fused2) #intersect with rvp results <--- DONT INTERSECT GSEA DIRECTLY, INTERSECT LEADING EDGE RESULTS
+print(gsea_of_interest)
+
+common_pathways_result1 <- gseaRes_fvr@result[gseaRes_fvr@result$Description %in% gsea_of_interest, ]
+common_pathways_result2 <- gseaRes_fvp@result[gseaRes_fvp@result$Description %in% gsea_of_interest, ]
+
+fusedvsRandP_GSEA1 = as_tibble(common_pathways_result1) %>% 
+  arrange(desc(abs(NES))) %>% 
+  #top_n(10, wt=-p.adjust) %>% #remove ranking for now so list is more comprehensive
+  dplyr::select(-core_enrichment) %>%
+  mutate(across(c("enrichmentScore", "NES"), round, digits=3)) %>% 
+  mutate(across(c("pvalue", "p.adjust", "qvalue"), scales::scientific))
+
+fusedvsRandP_GSEA2 = as_tibble(common_pathways_result2) %>% 
+  arrange(desc(abs(NES))) %>% 
+  #top_n(10, wt=-p.adjust) %>% #remove ranking for now so list is more comprehensive
+  dplyr::select(-core_enrichment) %>%
+  mutate(across(c("enrichmentScore", "NES"), round, digits=3)) %>% 
+  mutate(across(c("pvalue", "p.adjust", "qvalue"), scales::scientific))
+
+fusedvsparental_GSEA
+fusedvsresistant_GSEA
+resistantvsparental_GSEA
+fusedvsRandP_GSEA2
+fusedvsRandP_GSEA1
+
+```
+```{r, save_gsea_results_for_publication}
+
+# Load libraries
+# library(officer)
+# library(flextable)
+
+library(tibble)
+library(dplyr)
+library(knitr)
+library(kableExtra)
+
+# Get the top 10 rows
+# top_rows_fvp <- fusedvsparental_GSEA %>% arrange(p.adjust) %>%
+#   slice_head(n = 10)
+# 
+# # Generate LaTeX code and save to a .tex file
+# latex_table1 <- kable(top_rows_fvp, format = "latex", booktabs = TRUE)
+# 
+# # Save to a .tex file
+# writeLines(latex_table1, "top_10_fvp_GSEA.tex")
+
+#Get the top 10 rows
+fusedvsRandP_GSEA1 = fusedvsRandP_GSEA1 %>% mutate(p.adjust = as.numeric(p.adjust))
+top_rows_fvrp <- fusedvsRandP_GSEA1 %>% arrange(p.adjust)  %>% slice_head(n = 10) %>% select(1:7) %>% select(-c(pvalue))
+
+# Generate LaTeX code and save to a .tex file
+latex_table2 <- kable(top_rows_fvrp, format = "latex", booktabs = TRUE)
+
+# Save to a .tex file
+writeLines(latex_table2, paste("~/Desktop/", "top_10_fvrp_GSEA.tex"))
+
+```
+
+```{r, venn_diagram_DEGs}
+library(VennDiagram)
+library(grid)
+
+
+# ven <- venndetail(list(FusedvParental = fvp_tab_siggenes$SYMBOL, ResistantvParental = rvp_tab_siggenes$SYMBOL, FusedvsResistant = fvr_tab_siggenes$SYMBOL))
+
+fvp_tab_venn = fvp_tab_siggenes[(fvp_tab_siggenes$logFC > 1.5) | (fvp_tab_siggenes$logFC < -1.5),]
+rvp_tab_venn = rvp_tab_siggenes[rvp_tab_siggenes$logFC > 1.5 | rvp_tab_siggenes$logFC < -1.5, ]
+fvr_tab_venn = fvr_tab_siggenes[fvr_tab_siggenes$logFC > 1.5 | fvr_tab_siggenes$logFC < -1.5, ]
+  
+venn.plot <- venn.diagram(
+ x =list(FusedvParental = fvp_tab_venn$SYMBOL %>% na.omit() , ResistantvParental = rvp_tab_venn$SYMBOL %>% na.omit(), FusedvsResistant = fvr_tab_venn$SYMBOL %>% na.omit()),
+  filename = "venn.png", # Set to NULL to draw to R's plotting device
+  output = TRUE,
+  fill = c("lightblue", "lightgreen", "lightpink"),
+  alpha = 0.5,
+  label.col = "black",
+  cat.col = c("black", "black", "black"),
+  cat.cex = 1,
+  cex = 1,
+  main = "Significantly Differentially Expressed Gene Lists",
+  main.cex = 1.5
+)
+
+# Plot the diagram
+#grid.draw(venn.plot)
+#png("venndetail_plot.png", width = 800, height = 800)
+
+# Plot the Venn diagram
+#plot(ven)
+
+# Close the device to save the file
+#dev.off()
+
+#png("venn_diagram_sig_genes.png", width = 800, height = 800)
+#grid.draw(plot)
+#dev.off() # Close the graphics device to save the file
+
+common_genes_fused <- setdiff(intersect(fvr_tab_siggenes$SYMBOL, fvp_tab_siggenes$SYMBOL), rvp_tab_siggenes$SYMBOL)
+
+common_genes_fused
+
+fused_genes_of_interestFVP = fvp_tab_siggenes %>% filter(SYMBOL %in% common_genes_fused)
+
+fused_genes_of_interestFVP
+
+fused_genes_of_interestFVR = fvr_tab_siggenes %>% filter(SYMBOL %in% common_genes_fused)
+
+fused_genes_of_interestFVR
+
+#grid.draw(venn.plot)
+```
+
+```{r, parallel_volcano_plots_DEG}
+library(EnhancedVolcano)
+plot_volcano <- function(data, title = "Volcano Plot") {
+  EnhancedVolcano(
+    data,
+    lab = data$SYMBOL,
+    x = 'logFC',
+    y = 'PValue',
+    title = title,
+    pCutoff = 0.05, # Set a significance threshold
+    FCcutoff = 1,   # Set a fold-change threshold
+    pointSize = 3.0,
+    labSize = 4.0,
+    col = c("grey30", "forestgreen", "royalblue", "red2"),
+    colAlpha = 1,
+    legendPosition = "top",
+    legendLabSize = 12,
+    legendIconSize = 3.0,
+    drawConnectors = TRUE,
+    widthConnectors = 0.5 
+  )
+}
+
+# Example usage with a data frame named 'df1' for condition 1 vs. 2 comparison
+#plot_volcano(deseq2_fusedvsparentalDF, "Fused vs Parental")
+#4. Loop Over All Pairwise Comparisons
+#If you have multiple comparisons, you can store them in a list and iterate to create plots:
+
+#add GeneIDs back to DFs
+
+# deseq2_fusedvsparentalDF = deseq2_fusedvsparentalDF %>% mutate(GeneID = rownames(deseq2_fusedvsparentalDF))
+# deseq2_fusedvsresistantDF = deseq2_fusedvsresistantDF%>% mutate(GeneID = rownames(deseq2_fusedvsresistantDF))
+# deseq2_resistantvsparentalDF = deseq2_resistantvsparentalDF %>% mutate(GeneID = rownames(deseq2_resistantvsparentalDF))
+
+#add gene names back to DFs
+# annots1 <- AnnotationDbi:: select(org.Hs.eg.db, keys=deseq2_fusedvsparentalDF$GeneID, 
+#                 columns="SYMBOL", keytype="ENSEMBL", multiVals="first")
+# 
+# deseq2_fusedvsparentalDF <- merge(deseq2_fusedvsparentalDF, annots1, by.x="GeneID", by.y="ENSEMBL")
+# 
+# annots2 <- AnnotationDbi:: select(org.Hs.eg.db, keys=deseq2_fusedvsresistantDF$GeneID, 
+#                 columns="SYMBOL", keytype="ENSEMBL", multiVals="first")
+# 
+# deseq2_fusedvsresistantDF <- merge(deseq2_fusedvsresistantDF, annots2, by.x="GeneID", by.y="ENSEMBL")
+# 
+# annots3 <- AnnotationDbi:: select(org.Hs.eg.db, keys=deseq2_resistantvsparentalDF$GeneID, 
+#                 columns="SYMBOL", keytype="ENSEMBL", multiVals="first")
+# 
+# deseq2_resistantvsparentalDF <- merge(deseq2_resistantvsparentalDF, annots3, by.x="GeneID", by.y="ENSEMBL")
+# 
+# max_negLog10P <- max(results$negLog10P, na.rm = TRUE)
+
+# Assuming df_list contains your data frames for different comparisons
+df_list <- list(rvp_tab, fvr_tab, fvp_tab) # Replace with your actual data frames
+titles <- c("Resistant vs Parental", "Fused vs Resistant", "Fused vs Parental")
+
+# Create a volcano plot for each comparison
+for (i in seq_along(df_list)) {
+  file_name = paste0(titles[i], ".png")
+  plot_volcano(df_list[[i]], titles[i]) > ggsave(paste("~/Desktop/", file_name))
+}
+
+```
+```{r, heatmap of dge all}
+significant_genes <- test_res_all_tab[test_res_all_tab$PValue < 0.05, ]
+
+# Retrieve normalized counts for significant genes
+normalized_counts <- cpm(dge, normalized.lib.sizes = TRUE)
+#rename_dict <- c("Quant_RNA_Seq_S1 " = "Parental1", Quant_RNA_Seq_S2 = "Fused1", Quant_RNA_Seq_S3 = "Fused2", Quant_RNA_Seq_S4 = "Parental2", Quant_RNA_Seq_S5 = "Resistant1", Quant_RNA_Seq_S6 = "Fused3", Quant_RNA_Seq_S7 = "Parental3", Quant_RNA_Seq_S8 = "Resistant2", Quant_RNA_Seq_S9 = "Resistant3")
+colnames(normalized_counts) = c("Parental1", "Fused1", "Fused2", "Parental2", "Resistant1", "Fused3", "Parental3", "Resistant2", "Resistant3")
+#names(normalized_counts) <- rename_dict[names(normalized_counts)]
+df_groups = DataFrame(cols = colnames(normalized_counts), group= c("Parental", "Fused", "Fused", "Parental", "Resistant", "Fused", "Parental", "Resistant", "Resistant"))
+
+heatmap_data <- normalized_counts[rownames(normalized_counts) %in% rownames(significant_genes), ]
+
+
+# Generate the heatmap
+png("heatmap-deg.png", width = 800, height = 600)
+pheatmap(heatmap_data, 
+         cluster_rows = TRUE, 
+         cluster_cols = TRUE,
+         treeheight_row = 00,
+         treeheight_col = 00,
+         show_rownames = FALSE,
+         border_color = NA,
+         scale = "row", 
+         main = "Significantly Differentially Expressed Genes With PValue < 0.05",
+         fontsize = 14)
+dev.off()
+
+```
+```{r, pub_alternative_to_heatmap}
+
+#Arda notes:
+#yes, but if your primary aim is to just show that groups are similar/dissimilar without focusing on the genes, you can even remove the heatmap and just plot a 2d pca plot and color the groups,
+#
+#dont want to add much to your plate but another idea would be to show the 2d pca and add a 'pathway' activity heatmap using gsva or something similar?
+
+#PCA plot on significantly differentially expressed genes only
+
+# Perform PCA
+#scale data first though
+data = scale(normalized_counts)
+pca_result <- prcomp(t(data), scale. = TRUE)
+
+# Plot PCA
+pca_data <- data.frame(pca_result$x[, 1:2])  # Get the first two principal components
+colnames(pca_data) <- c("PC1", "PC2")
+pca_data$Group <- df_groups$group
+
+# Basic PCA plot
+plot(pca_data$PC1, pca_data$PC2, xlab = "PC1", ylab = "PC2", main = "PCA Plot", col = as.factor(pca_data$Group))
+legend("topright", legend = unique(pca_data$Group), col = unique(as.factor(pca_data$Group)), pch = 19)
+
+```
+
+```{r more_PCA_things_from_Arda}
+
+#you might want to also include the variance explained per component and investigate the feature/gene loadings on each component
+
+#chatGPT is helping me translate this into code...
+
+# Variance explained
+variance_explained <- pca_result$sdev^2 / sum(pca_result$sdev^2) * 100
+
+# Base R Plot
+plot(pca_result$x[, 1:2], 
+     xlab = paste("PC1 (", round(variance_explained[1], 2), "%)", sep = ""),
+     ylab = paste("PC2 (", round(variance_explained[2], 2), "%)", sep = ""),
+     main = "PCA Plot")
+
+# Using ggplot2
+library(ggplot2)
+pca_data <- as.data.frame(pca_result$x)
+pca_data$label <- rownames(pca_data)  # Add labels if necessary
+
+ggplot(pca_data, aes(x = PC1, y = PC2, label = label)) +
+  geom_point() +
+  geom_text(vjust = 1.5) +
+  xlab(paste("PC1 (", round(variance_explained[1], 2), "%)", sep = "")) +
+  ylab(paste("PC2 (", round(variance_explained[2], 2), "%)", sep = "")) +
+  ggtitle("PCA Plot")
+
+# Loadings
+loadings <- pca_result$rotation
+
+# Biplot
+biplot(pca_result)
+
+loadings_data <- as.data.frame(loadings)
+loadings_data$Feature <- rownames(loadings_data)
+
+ggplot(loadings_data, aes(x = PC1, y = PC2, label = Feature)) +
+  geom_text() +
+  theme_minimal() +
+  ggtitle("PCA Loadings Plot")
+
+```
+
+```{r improve_interpretability_of_loadings}
+
+#Arda suggestions (similar to ChatGPT suggestions also)
+
+#first start with top 50-100 genes and/or plot the loadings and see if there are any changes in the slopes, like elbow plots
+
+#using chatGPT for outline again:
+
+#data <- scale(normalized_counts)  # Scale your data if necessary
+#pca_result <- prcomp(data, center = TRUE, scale. = TRUE)
+
+# Variance explained
+variance_explained <- pca_result$sdev^2 / sum(pca_result$sdev^2)
+cumulative_variance <- cumsum(variance_explained)
+
+# Create a data frame for plotting
+variance_data <- data.frame(
+    Component = 1:length(variance_explained),
+    Variance = variance_explained,
+    Cumulative = cumulative_variance
+)
+
+# Using ggplot2 to create the elbow plot
+library(ggplot2)
+
+ggplot(variance_data, aes(x = Component)) +
+  geom_line(aes(y = Variance), color = "blue", size = 1) +
+  geom_point(aes(y = Variance), color = "blue") +
+  geom_line(aes(y = Cumulative), color = "red", size = 1) +
+  geom_point(aes(y = Cumulative), color = "red") +
+  labs(x = "Principal Components",
+       y = "Variance Explained",
+       title = "Elbow Plot of PCA Loadings") +
+  theme_minimal() +
+  scale_y_continuous(sec.axis = sec_axis(~ ., name = "Cumulative Variance Explained"))
+
+
+#result -- chatGPT helped me create an elbow plot for the number of principal components...which can be useful but not really what I intended
+
+#looks like 2-3 PCs is appropriate though based on individual variance or 7 based on cumulative variance approaching 1
+
+#will now try again with loading components instead oop
+
+#post lab-meeting -- looks like vast majority of variance is in PC1 so for simplicity/reducing number of genes of interest, will just look at PC1
+```
+
+```{r PCA_gene_loadings_just_PC1_attempt1_chatgpt}
+
+#ChatGPT to the rescue for helping me set this up again!
+
+loadings <- pca_result$rotation
+loadings_PC1 <- loadings[, 1]
+
+#get absolute value so can rank independent of pos. or neg. correlation terms
+abs_loadings_PC1 <- abs(loadings_PC1)
+
+#organize loading data by gene_name
+abs_loading_data <- data.frame(
+    Gene = rownames(loadings),
+    Loading_PC1 = abs_loadings_PC1)
+
+orig_loading_data <- data.frame(
+    Gene = rownames(loadings),
+    Loading_PC1 = loadings_PC1)
+
+# Sort the loadings for PC1
+loading_PC1_sorted <- abs_loading_data[order(-abs_loading_data$Loading_PC1), ]
+
+# Cumulative sum of sorted loadings
+loading_PC1_cumsum <- cumsum(loading_PC1_sorted$Loading_PC1) #get total variance again from PC1 only
+loading_PC1_cumsum <- loading_PC1_cumsum / max(loading_PC1_cumsum)  # Normalize by overall variance of PC1
+
+# Create the elbow plot for PC1
+ggplot(data = data.frame(Index = 1:nrow(loading_PC1_sorted),
+                          CumulativeVariance = loading_PC1_cumsum), 
+       aes(x = Index, y = CumulativeVariance)) +
+  geom_line(color = "blue", size = 1) +
+  geom_point(color = "blue") +
+  labs(x = "Ranked Genes by Absolute Loadings (PC1)",
+       y = "Cumulative Variance Explained (Normalized)",
+       title = "Elbow Plot for Gene Loadings - PC1") +
+  theme_minimal()
+
+#seems to flatten around 19-20,000 that's still so many!!! but okay
+
+
+# Create the elbow plot for PC1
+ggplot(data = data.frame(Index = 1:nrow(loading_PC1_sorted),
+                         Loadings = loading_PC1_sorted$Loading_PC1),
+       aes(x = Index, y = Loadings)) +
+  geom_point(color = "blue") +
+  labs(x = "Ranked Genes by Absolute Loadings (PC1)",
+       y = "Individual (Abs) Loading Values of PC1",
+       title = "Elbow Plot for Gene Loadings - PC1") +
+  theme_minimal()
+
+#need to grab top 10000 genes and then grab loadings (not absolute values) to look at distribution across positive and negative
+top10000genes= loading_PC1_sorted[0:10000, ]
+
+distrib_loadings = orig_loading_data %>% filter(Gene %in% top10000genes$Gene)
+
+#plot distrib of loadings
+# Create the elbow plot for PC1
+hist(distrib_loadings$Loading_PC1)
+
+```
+
+
+
+
+
+
+
+```{r compare_to_GSEA_analysis}
+#when I did GSEA analysis I had two slightly different results depending on if I combined fused vs resitant with fused vs parental or vice versa (the order of the combinations mattered for some reason)
+
+library(fgsea)
+
+overlap_GSEA_fvrandp_pathways = intersect(fusedvsRandP_GSEA1$ID, fusedvsRandP_GSEA2$ID)
+
+merge_GSEA_fvrp = merge(fusedvsRandP_GSEA1, fusedvsRandP_GSEA2, by="ID") 
+
+merge_GSEA_fvrp$p.adjust.x<-as.double(merge_GSEA_fvrp$p.adjust.x)
+merge_GSEA_fvrp$p.adjust.y<- as.double(merge_GSEA_fvrp$p.adjust.y)
+
+merge_GSEA_fvrp_signifance_thresholded = merge_GSEA_fvrp %>% filter(p.adjust.x <= .05) %>% filter(p.adjust.y <= .05) %>% arrange(NES.x)
+
+merge_GSEA_fvrp_signifance_thresholded
+
+
+library(org.Hs.eg.db)
+
+GSEA_geneset_strict = merge_GSEA_fvrp_signifance_thresholded$leading_edge.x[1]
+
+print(GSEA_geneset_strict)
+
+#don't intersect GSEA outputs, intersect leading edge gene lists between two "directions" of fvrandp (fvp vs rvp)
+                     
+```

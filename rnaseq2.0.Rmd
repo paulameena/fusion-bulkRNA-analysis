@@ -1,0 +1,575 @@
+---
+title: "updated_rnaseq_nov2024"
+author: "Paulameena Shultes"
+date: "2024-11-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(data.table)
+library(dplyr)
+library(limma)
+library(edgeR)
+library(tximport)
+library(biomaRt)
+library(DESeq2)
+library(org.Hs.eg.db)
+library(ggplot2)
+library(scales)
+library(viridis)
+library(ggdendro)
+library(gridExtra)
+```
+
+```{r, arda_stuff}
+# # This script is used to clean, filter, normalize and run DEG
+# # analysis on the gene count data
+# 
+# setwd('/mnt/pan/SOM_CCCC_JGS25/durmaza/bulkrnaseq_fusion/RNASeq_Analysis/')
+# 
+# f_list <- list.files(path='RNA_SEQ/', pattern = 'quant.sf', recursive = TRUE, full.names = TRUE)
+# tx2_gene <- fread('/mnt/pan/SOM_CCCC_JGS25/durmaza/resources/grch38_gencodev42_tx2gene.tsv', header=FALSE, sep='\t') %>%
+#   filter(V1!='') %>%
+#   distinct(V1, V2, V3)
+# 
+# 
+# #### Check Abundance estimates ####
+# count_res <- tximport(f_list, 
+#                       type = 'salmon', 
+#                       txIn = TRUE, 
+#                       txOut = FALSE, 
+#                       countsFromAbundance = 'scaledTPM', 
+#                       tx2gene = data.frame('transcript_id'=tx2_gene$V2,
+#                                            'gene_id'=tx2_gene$V1),
+#                       infRepStat = matrixStats::rowMedians)
+
+count_mat <- read.csv("./rna_2_counts (1).csv")
+obs_ft <- read.csv("./obs_ft (1).csv")
+obs_ft <-  subset(obs_ft, select = -c(X) )
+rownames(count_mat) <- count_mat$X
+count_mat = subset(count_mat, select = -c(X) )
+f_list <- read.csv("./f_list.csv")
+tx2_gene <- read.csv("./tx2_gene (1).csv")
+tx2_gene = subset(tx2_gene, select = -c(X) )
+#colnames(count_mat) <- basename(gsub(pattern='/quant.sf', replacement = '', f_list))
+
+# Check Abundance #
+#tx2_gene <- tx2_gene[match(rownames(count_mat), table=tx2_gene$V1),]
+
+require(pheatmap)
+pheatmap(sapply(unique(tx2_gene$V3), function(s){
+  local_mapp <- subset(tx2_gene, tx2_gene$V3 == s)
+  local_count_mat <- count_mat[which(rownames(count_mat) %in% local_mapp$V1),,drop=FALSE]
+  log10(colSums(local_count_mat)+1)
+}))
+
+#count_mat <- count_mat[which(rownames(count_mat) %in% tx2_gene$V1[which(tx2_gene$V4 %in% c('protein_coding', 'lncRNA'))]),]
+count_mat <- count_mat[which(rownames(count_mat) %in% tx2_gene$V1[which(tx2_gene$V3 %in% c('protein_coding', 'lncRNA', 'snRNA', 'snoRNA', 'miRNA'))]),]
+
+design_mat <- model.matrix(~0+obs_ft$tag)
+dge <- DGEList(counts = count_mat)
+dge <- dge[filterByExpr(dge, design=design_mat),]
+dge <- calcNormFactors(dge, method='TMM', logratioTrim = 0.15, sumTrim = 0.025)
+
+dge <- estimateGLMRobustDisp(dge, design=design_mat)
+fit_res <- glmQLFit(dge, design_mat) #switched to qlfit to be less permissive
+test_res_all = glmQLFTest(fit_res)
+test_res_all_tab = topTags(test_res_all, n=Inf, adjust.method = 'BY', sort.by = 'none')$table #updated correction
+test_res_all_tab$symbol <- tx2_gene$V3[match(rownames(test_res_all_tab), table=tx2_gene$V1)]
+
+test_res <- glmQLFTest(fit_res, contrast = c(0,-1,1))
+test_res_tab <- topTags(test_res, n=Inf, adjust.method = 'fdr', sort.by = 'none')$table
+test_res_tab$symbol <- tx2_gene$V3[match(rownames(test_res_tab), table=tx2_gene$V1)]
+hist(test_res_tab$PValue)
+plot(test_res_tab$logFC, -log10(test_res_tab$FDR))
+
+test_res_tab$symbol
+View(test_res_tab)
+
+```
+
+```{r, dge_cont}
+
+rvp_tab = test_res_tab
+fvp = glmQLFTest(fit_res, contrast = c(1,-1,0))
+fvp_tab <- topTags(fvp, n=Inf, adjust.method = 'fdr', sort.by = 'none')$table
+hist(fvp_tab$PValue)
+fvr = glmQLFTest(fit_res, contrast = c(1,0,-1))
+fvr_tab = topTags(fvr, n=Inf, adjust.method = 'fdr', sort.by = 'none')$table
+hist(fvr_tab$PValue)
+
+#add gene names
+temp = rownames(fvr_tab)
+fvr_tab = fvr_tab %>%
+  mutate(ensembl = sapply(strsplit(as.character(temp), "\\."), `[[`, 1))
+gene_annots <- AnnotationDbi:: select(org.Hs.eg.db, keys=fvr_tab$ensembl, 
+                columns="SYMBOL", keytype="ENSEMBL", multiVals="first")
+fvr_tab = merge.data.frame(fvr_tab, gene_annots, by.x = "ensembl", by.y="ENSEMBL")
+
+temp = rownames(fvp_tab)
+fvp_tab = fvp_tab %>%
+  mutate(ensembl = sapply(strsplit(as.character(temp), "\\."), `[[`, 1))
+gene_annots <- AnnotationDbi:: select(org.Hs.eg.db, keys=fvp_tab$ensembl, 
+                columns="SYMBOL", keytype="ENSEMBL", multiVals="first")
+fvp_tab = merge.data.frame(fvp_tab, gene_annots, by.x = "ensembl", by.y="ENSEMBL")
+
+temp = rownames(rvp_tab)
+rvp_tab = rvp_tab %>%
+  mutate(ensembl = sapply(strsplit(as.character(temp), "\\."), `[[`, 1))
+gene_annots <- AnnotationDbi:: select(org.Hs.eg.db, keys=rvp_tab$ensembl, 
+                columns="SYMBOL", keytype="ENSEMBL", multiVals="first")
+rvp_tab = merge.data.frame(rvp_tab, gene_annots, by.x = "ensembl", by.y="ENSEMBL")
+
+#set a boolean column for significance
+fvr_tab$significant = ifelse(fvr_tab$PValue < .05, "Significant", NA) 
+fvp_tab$significant = ifelse(fvp_tab$PValue < .05, "Significant", NA)
+rvp_tab$significant = ifelse(rvp_tab$PValue < .05, "Significant", NA)
+
+#get lists of sig genes
+fvr_tab_siggenes = fvr_tab %>% filter(significant == "Significant") 
+fvp_tab_siggenes = fvp_tab %>% filter(significant == "Significant") 
+rvp_tab_siggenes = rvp_tab %>% filter(significant == "Significant") 
+
+fvr_tab_siggenes
+fvp_tab_siggenes
+rvp_tab_siggenes
+```
+
+
+
+```{r, gene_enrichment}
+library(tidyverse)
+library(clusterProfiler)
+
+#add geneID
+fvp_tab_siggenes$Entrez = mapIds(org.Hs.eg.db, keys = fvp_tab_siggenes$ensembl, keytype = 'ENSEMBL', column = 'ENTREZID', multiVals = "first")
+fvr_tab_siggenes$Entrez = mapIds(org.Hs.eg.db, keys = fvr_tab_siggenes$ensembl, keytype = 'ENSEMBL', column = 'ENTREZID', multiVals = "first")
+rvp_tab_siggenes$Entrez = mapIds(org.Hs.eg.db, keys = rvp_tab_siggenes$ensembl, keytype = 'ENSEMBL', column = 'ENTREZID', multiVals = "first")
+
+#search KEGG
+keggRes_fusedvparental <- enrichKEGG(gene = fvp_tab_siggenes$Entrez, organism = 'hsa')
+keggRes_fusedvresistant <- enrichKEGG(gene = fvr_tab_siggenes$Entrez, organism = 'hsa')
+keggRes_rvp <- enrichKEGG(gene = rvp_tab_siggenes$Entrez, organism = 'hsa')
+
+#show results as tibbles
+keggRes_fvp_tibble = as_tibble(keggRes_fusedvparental)
+keggRes_fvr_tibble= as_tibble(keggRes_fusedvresistant)
+keggRes_rvp_tibble = as_tibble(keggRes_rvp)
+
+print(keggRes_fvp_tibble)
+print(keggRes_fvr_tibble)
+print(keggRes_rvp_tibble)
+```
+
+
+#Gene ontology analysis
+clusterProfiler can also perform over-representation analysis on GO terms using the command enrichGO
+##fused vs parental
+```{r calculate_fvp_GO}
+#fused vs parental first, in all 3 categories
+universe = fvp_tab$ensembl
+
+ego_fvp_BP <- enrichGO(gene = fvp_tab_siggenes$ensembl, 
+                universe = universe,
+                OrgDb = org.Hs.eg.db,
+                keyType = "ENSEMBL",
+                ont = "BP",
+                pvalueCutoff= 0.05,
+                readable= TRUE)
+
+ego_fvp_CC <- enrichGO(gene = fvp_tab_siggenes$ensembl, 
+                universe = universe,
+                OrgDb = org.Hs.eg.db,
+                keyType = "ENSEMBL",
+                ont = "CC",
+                pvalueCutoff= 0.05,
+                readable= TRUE)
+
+
+ego_fvp_MF <- enrichGO(gene = fvp_tab_siggenes$ensembl, 
+                universe = universe,
+                OrgDb = org.Hs.eg.db,
+                keyType = "ENSEMBL",
+                ont = "MF",
+                pvalueCutoff= 0.05,
+                readable= TRUE)
+
+```
+
+```{r plot_fvp_GO, fig.width=6, fig.height=5}
+barplot(ego_fvp_BP, showCategory=10, title= "fused vs parental biological processes")
+barplot(ego_fvp_CC, showCategory=10, title= "fused vs parental cellular components")
+barplot(ego_fvp_MF, showCategory=10, title = "fused vs parental metabolic functions")
+```
+## fused vs resistant
+```{r calculate_fvr_GO}
+#fused vs parental first, in all 3 categories
+universe = fvr_tab$ensembl
+
+ego_fvr_BP <- enrichGO(gene = fvr_tab_siggenes$ensembl, 
+                universe = universe,
+                OrgDb = org.Hs.eg.db,
+                keyType = "ENSEMBL",
+                ont = "BP",
+                pvalueCutoff= 0.05,
+                readable= TRUE)
+
+ego_fvr_CC <- enrichGO(gene = fvr_tab_siggenes$ensembl, 
+                universe = universe,
+                OrgDb = org.Hs.eg.db,
+                keyType = "ENSEMBL",
+                ont = "CC",
+                pvalueCutoff= 0.05,
+                readable= TRUE)
+
+
+ego_fvr_MF <- enrichGO(gene = fvr_tab_siggenes$ensembl, 
+                universe = universe,
+                OrgDb = org.Hs.eg.db,
+                keyType = "ENSEMBL",
+                ont = "MF",
+                pvalueCutoff= 0.05,
+                readable= TRUE)
+
+```
+
+```{r plot_fvr_GO, fig.width=6, fig.height=5}
+barplot(ego_fvr_BP, showCategory=10, title="fused vs resistant biological processes")
+barplot(ego_fvr_CC, showCategory=10, title= "fused vs resistant cellular components")
+barplot(ego_fvr_MF, showCategory=20, title="fused vs resistant metabolic functions") #no results
+```
+
+## resistant vs parental
+```{r calculate_rvp_GO}
+#fused vs parental first, in all 3 categories
+universe = rvp_tab$ensembl
+
+ego_rvp_BP <- enrichGO(gene = rvp_tab_siggenes$ensembl, 
+                universe = universe,
+                OrgDb = org.Hs.eg.db,
+                keyType = "ENSEMBL",
+                ont = "BP",
+                pvalueCutoff= 0.05,
+                readable= TRUE)
+
+ego_rvp_CC <- enrichGO(gene = rvp_tab_siggenes$ensembl, 
+                universe = universe,
+                OrgDb = org.Hs.eg.db,
+                keyType = "ENSEMBL",
+                ont = "CC",
+                pvalueCutoff= 0.05,
+                readable= TRUE)
+
+
+ego_rvp_MF <- enrichGO(gene = rvp_tab_siggenes$ensembl, 
+                universe = universe,
+                OrgDb = org.Hs.eg.db,
+                keyType = "ENSEMBL",
+                ont = "MF",
+                pvalueCutoff= 0.05,
+                readable= TRUE)
+
+```
+
+```{r plot_fvr_GO, fig.width=6, fig.height=5}
+barplot(ego_rvp_BP, showCategory=10, title="resistant vs parental biological processes")
+barplot(ego_rvp_CC, showCategory=10, title= "reistant vs parental cellular components")
+barplot(ego_rvp_MF, showCategory=10, title="resistant vs parental metabolic functions")
+```
+
+# GSEA analysis
+
+```{r, load_library_for_Gsea}
+library(msigdbr)
+
+```
+
+## rank gene sets by logFC
+```{r, rank_genesets}
+fvr_tab = fvr_tab %>% mutate(GeneID = fvr_tab$ensembl) 
+rankedGenes_fvr <- fvr_tab %>%
+  filter(!is.na(GeneID)) %>%
+  mutate(rank = logFC) %>%
+  arrange(desc(rank)) %>%
+  pull(rank, GeneID)
+
+fvp_tab = fvp_tab %>% mutate(GeneID = fvp_tab$ensembl) 
+rankedGenes_fvp <- fvp_tab %>%
+  filter(!is.na(GeneID)) %>%
+  mutate(rank = logFC) %>%
+  arrange(desc(rank)) %>%
+  pull(rank, GeneID)
+
+rvp_tab = rvp_tab %>% mutate(GeneID = rvp_tab$ensembl) 
+rankedGenes_rvp <- rvp_tab %>%
+  filter(!is.na(GeneID)) %>%
+  mutate(rank = logFC) %>%
+  arrange(desc(rank)) %>%
+  pull(rank, GeneID)
+```
+
+## load pathways
+```{r}
+term2gene <- msigdbr(species = "Homo sapiens", category = "H") %>% 
+  dplyr::select(gs_name, ensembl_gene)
+term2name <- msigdbr(species = "Homo sapiens", category = "H") %>% 
+  dplyr::select(gs_name, gs_description) %>% 
+  distinct()
+
+```
+
+## perform GSEA analysis
+```{r, run_GSEA analysis}
+gseaRes_fvr <- GSEA(rankedGenes_fvr,
+                TERM2GENE = term2gene,
+                TERM2NAME = term2name,
+                pvalueCutoff = 1.00, 
+                minGSSize = 15,
+                maxGSSize = 500)
+
+gseaRes_fvp <- GSEA(rankedGenes_fvp,
+                TERM2GENE = term2gene,
+                TERM2NAME = term2name,
+                pvalueCutoff = 1.00, 
+                minGSSize = 15,
+                maxGSSize = 500)
+
+gseaRes_rvp <- GSEA(rankedGenes_rvp,
+                TERM2GENE = term2gene,
+                TERM2NAME = term2name,
+                pvalueCutoff = 1.00, 
+                minGSSize = 15,
+                maxGSSize = 500)
+```
+
+```{r, examine_top_10_results_for_each}
+fusedvsresistant_GSEA = as_tibble(gseaRes_fvr) %>% 
+  arrange(desc(abs(NES))) %>% 
+  top_n(10, wt=-p.adjust) %>% 
+  dplyr::select(-core_enrichment) %>%
+  mutate(across(c("enrichmentScore", "NES"), round, digits=3)) %>% 
+  mutate(across(c("pvalue", "p.adjust", "qvalue"), scales::scientific))
+
+fusedvsparental_GSEA = as_tibble(gseaRes_fvp) %>% 
+  arrange(desc(abs(NES))) %>% 
+  top_n(10, wt=-p.adjust) %>% 
+  dplyr::select(-core_enrichment) %>%
+  mutate(across(c("enrichmentScore", "NES"), round, digits=3)) %>% 
+  mutate(across(c("pvalue", "p.adjust", "qvalue"), scales::scientific))
+
+resistantvsparental_GSEA= as_tibble(gseaRes_rvp) %>% 
+  arrange(desc(abs(NES))) %>% 
+  top_n(10, wt=-p.adjust) %>% 
+  dplyr::select(-core_enrichment) %>%
+  mutate(across(c("enrichmentScore", "NES"), round, digits=3)) %>% 
+  mutate(across(c("pvalue", "p.adjust", "qvalue"), scales::scientific))
+
+#unique fused gene set enrichment results
+fused1 = gseaRes_fvp@result$Description
+fused2 = gseaRes_fvr@result$Description
+minus = gseaRes_rvp@result$Description
+
+gsea_of_interest = intersect(fused1, fused2)
+common_pathways_result1 <- gseaRes_fvr@result[gseaRes_fvr@result$Description %in% gsea_of_interest, ]
+common_pathways_result2 <- gseaRes_fvp@result[gseaRes_fvp@result$Description %in% gsea_of_interest, ]
+
+fusedvsRandP_GSEA1 = as_tibble(common_pathways_result1) %>% 
+  arrange(desc(abs(NES))) %>% 
+  top_n(10, wt=-p.adjust) %>% 
+  dplyr::select(-core_enrichment) %>%
+  mutate(across(c("enrichmentScore", "NES"), round, digits=3)) %>% 
+  mutate(across(c("pvalue", "p.adjust", "qvalue"), scales::scientific))
+
+fusedvsRandP_GSEA2 = as_tibble(common_pathways_result2) %>% 
+  arrange(desc(abs(NES))) %>% 
+  top_n(10, wt=-p.adjust) %>% 
+  dplyr::select(-core_enrichment) %>%
+  mutate(across(c("enrichmentScore", "NES"), round, digits=3)) %>% 
+  mutate(across(c("pvalue", "p.adjust", "qvalue"), scales::scientific))
+
+fusedvsparental_GSEA
+fusedvsresistant_GSEA
+resistantvsparental_GSEA
+fusedvsRandP_GSEA2
+fusedvsRandP_GSEA1
+
+```
+```{r, save_gsea_results_for_publication}
+
+# Load libraries
+# library(officer)
+# library(flextable)
+
+library(tibble)
+library(dplyr)
+library(knitr)
+library(kableExtra)
+
+# Get the top 10 rows
+# top_rows_fvp <- fusedvsparental_GSEA %>% arrange(p.adjust) %>%
+#   slice_head(n = 10)
+# 
+# # Generate LaTeX code and save to a .tex file
+# latex_table1 <- kable(top_rows_fvp, format = "latex", booktabs = TRUE)
+# 
+# # Save to a .tex file
+# writeLines(latex_table1, "top_10_fvp_GSEA.tex")
+
+#Get the top 10 rows
+fusedvsRandP_GSEA1 = fusedvsRandP_GSEA1 %>% mutate(p.adjust = as.numeric(p.adjust))
+top_rows_fvrp <- fusedvsRandP_GSEA1 %>% arrange(p.adjust)  %>% slice_head(n = 10) %>% select(1:7) %>% select(-c(pvalue))
+
+# Generate LaTeX code and save to a .tex file
+latex_table2 <- kable(top_rows_fvrp, format = "latex", booktabs = TRUE)
+
+# Save to a .tex file
+writeLines(latex_table2, paste("~/Desktop/", "top_10_fvrp_GSEA.tex"))
+
+```
+
+```{r, venn_diagram_DEGs}
+library(VennDiagram)
+library(grid)
+
+
+# ven <- venndetail(list(FusedvParental = fvp_tab_siggenes$SYMBOL, ResistantvParental = rvp_tab_siggenes$SYMBOL, FusedvsResistant = fvr_tab_siggenes$SYMBOL))
+
+fvp_tab_venn = fvp_tab_siggenes[(fvp_tab_siggenes$logFC > 1.5) | (fvp_tab_siggenes$logFC < -1.5),]
+rvp_tab_venn = rvp_tab_siggenes[rvp_tab_siggenes$logFC > 1.5 | rvp_tab_siggenes$logFC < -1.5, ]
+fvr_tab_venn = fvr_tab_siggenes[fvr_tab_siggenes$logFC > 1.5 | fvr_tab_siggenes$logFC < -1.5, ]
+  
+venn.plot <- venn.diagram(
+ x =list(FusedvParental = fvp_tab_venn$SYMBOL %>% na.omit() , ResistantvParental = rvp_tab_venn$SYMBOL %>% na.omit(), FusedvsResistant = fvr_tab_venn$SYMBOL %>% na.omit()),
+  filename = "venn.png", # Set to NULL to draw to R's plotting device
+  output = TRUE,
+  fill = c("lightblue", "lightgreen", "lightpink"),
+  alpha = 0.5,
+  label.col = "black",
+  cat.col = c("black", "black", "black"),
+  cat.cex = 1,
+  cex = 1,
+  main = "Significantly Differentially Expressed Gene Lists",
+  main.cex = 1.5
+)
+
+# Plot the diagram
+#grid.draw(venn.plot)
+#png("venndetail_plot.png", width = 800, height = 800)
+
+# Plot the Venn diagram
+#plot(ven)
+
+# Close the device to save the file
+#dev.off()
+
+#png("venn_diagram_sig_genes.png", width = 800, height = 800)
+#grid.draw(plot)
+#dev.off() # Close the graphics device to save the file
+
+common_genes_fused <- setdiff(intersect(fvr_tab_siggenes$SYMBOL, fvp_tab_siggenes$SYMBOL), rvp_tab_siggenes$SYMBOL)
+
+common_genes_fused
+
+fused_genes_of_interestFVP = fvp_tab_siggenes %>% filter(SYMBOL %in% common_genes_fused)
+
+fused_genes_of_interestFVP
+
+fused_genes_of_interestFVR = fvr_tab_siggenes %>% filter(SYMBOL %in% common_genes_fused)
+
+fused_genes_of_interestFVR
+
+#grid.draw(venn.plot)
+```
+
+```{r, parallel_volcano_plots_DEG}
+library(EnhancedVolcano)
+plot_volcano <- function(data, title = "Volcano Plot") {
+  EnhancedVolcano(
+    data,
+    lab = data$SYMBOL,
+    x = 'logFC',
+    y = 'PValue',
+    title = title,
+    pCutoff = 0.05, # Set a significance threshold
+    FCcutoff = 1,   # Set a fold-change threshold
+    pointSize = 3.0,
+    labSize = 4.0,
+    col = c("grey30", "forestgreen", "royalblue", "red2"),
+    colAlpha = 1,
+    legendPosition = "top",
+    legendLabSize = 12,
+    legendIconSize = 3.0,
+    drawConnectors = TRUE,
+    widthConnectors = 0.5 
+  )
+}
+
+# Example usage with a data frame named 'df1' for condition 1 vs. 2 comparison
+#plot_volcano(deseq2_fusedvsparentalDF, "Fused vs Parental")
+#4. Loop Over All Pairwise Comparisons
+#If you have multiple comparisons, you can store them in a list and iterate to create plots:
+
+#add GeneIDs back to DFs
+
+# deseq2_fusedvsparentalDF = deseq2_fusedvsparentalDF %>% mutate(GeneID = rownames(deseq2_fusedvsparentalDF))
+# deseq2_fusedvsresistantDF = deseq2_fusedvsresistantDF%>% mutate(GeneID = rownames(deseq2_fusedvsresistantDF))
+# deseq2_resistantvsparentalDF = deseq2_resistantvsparentalDF %>% mutate(GeneID = rownames(deseq2_resistantvsparentalDF))
+
+#add gene names back to DFs
+# annots1 <- AnnotationDbi:: select(org.Hs.eg.db, keys=deseq2_fusedvsparentalDF$GeneID, 
+#                 columns="SYMBOL", keytype="ENSEMBL", multiVals="first")
+# 
+# deseq2_fusedvsparentalDF <- merge(deseq2_fusedvsparentalDF, annots1, by.x="GeneID", by.y="ENSEMBL")
+# 
+# annots2 <- AnnotationDbi:: select(org.Hs.eg.db, keys=deseq2_fusedvsresistantDF$GeneID, 
+#                 columns="SYMBOL", keytype="ENSEMBL", multiVals="first")
+# 
+# deseq2_fusedvsresistantDF <- merge(deseq2_fusedvsresistantDF, annots2, by.x="GeneID", by.y="ENSEMBL")
+# 
+# annots3 <- AnnotationDbi:: select(org.Hs.eg.db, keys=deseq2_resistantvsparentalDF$GeneID, 
+#                 columns="SYMBOL", keytype="ENSEMBL", multiVals="first")
+# 
+# deseq2_resistantvsparentalDF <- merge(deseq2_resistantvsparentalDF, annots3, by.x="GeneID", by.y="ENSEMBL")
+# 
+# max_negLog10P <- max(results$negLog10P, na.rm = TRUE)
+
+# Assuming df_list contains your data frames for different comparisons
+df_list <- list(rvp_tab, fvr_tab, fvp_tab) # Replace with your actual data frames
+titles <- c("Resistant vs Parental", "Fused vs Resistant", "Fused vs Parental")
+
+# Create a volcano plot for each comparison
+for (i in seq_along(df_list)) {
+  file_name = paste0(titles[i], ".png")
+  plot_volcano(df_list[[i]], titles[i]) > ggsave(paste("~/Desktop/", file_name))
+}
+
+```
+```{r, heatmap of dge all}
+significant_genes <- test_res_all_tab[test_res_all_tab$PValue < 0.05, ]
+
+# Retrieve normalized counts for significant genes
+normalized_counts <- cpm(dge, normalized.lib.sizes = TRUE)
+#rename_dict <- c("Quant_RNA_Seq_S1 " = "Parental1", Quant_RNA_Seq_S2 = "Fused1", Quant_RNA_Seq_S3 = "Fused2", Quant_RNA_Seq_S4 = "Parental2", Quant_RNA_Seq_S5 = "Resistant1", Quant_RNA_Seq_S6 = "Fused3", Quant_RNA_Seq_S7 = "Parental3", Quant_RNA_Seq_S8 = "Resistant2", Quant_RNA_Seq_S9 = "Resistant3")
+colnames(normalized_counts) = c("Parental1", "Fused1", "Fused2", "Parental2", "Resistant1", "Fused3", "Parental3", "Resistant2", "Resistant3")
+#names(normalized_counts) <- rename_dict[names(normalized_counts)]
+
+
+heatmap_data <- normalized_counts[rownames(normalized_counts) %in% rownames(significant_genes), ]
+
+
+# Generate the heatmap
+png("heatmap-deg.png", width = 800, height = 600)
+pheatmap(heatmap_data, 
+         cluster_rows = TRUE, 
+         cluster_cols = TRUE,
+         treeheight_row = 00,
+         treeheight_col = 00,
+         show_rownames = FALSE,
+         border_color = NA,
+         scale = "row", 
+         main = "Significantly Differentially Expressed Genes With PValue < 0.05",
+         fontsize = 14)
+dev.off()
+
+```
