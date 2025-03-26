@@ -1,0 +1,34 @@
+INFO [2025-03-14 13:54:05] $x
+INFO [2025-03-14 13:54:05] list(FusedvParental = fvp_tab_venn$SYMBOL %>% na.omit(), ResistantvParental = rvp_tab_venn$SYMBOL %>% 
+INFO [2025-03-14 13:54:05]     na.omit(), FusedvsResistant = fvr_tab_venn$SYMBOL %>% na.omit())
+INFO [2025-03-14 13:54:05] 
+INFO [2025-03-14 13:54:05] $filename
+INFO [2025-03-14 13:54:05] [1] "venn.png"
+INFO [2025-03-14 13:54:05] 
+INFO [2025-03-14 13:54:05] $output
+INFO [2025-03-14 13:54:05] [1] TRUE
+INFO [2025-03-14 13:54:05] 
+INFO [2025-03-14 13:54:05] $fill
+INFO [2025-03-14 13:54:05] c("lightblue", "lightgreen", "lightpink")
+INFO [2025-03-14 13:54:05] 
+INFO [2025-03-14 13:54:05] $alpha
+INFO [2025-03-14 13:54:05] [1] 0.5
+INFO [2025-03-14 13:54:05] 
+INFO [2025-03-14 13:54:05] $label.col
+INFO [2025-03-14 13:54:05] [1] "black"
+INFO [2025-03-14 13:54:05] 
+INFO [2025-03-14 13:54:05] $cat.col
+INFO [2025-03-14 13:54:05] c("black", "black", "black")
+INFO [2025-03-14 13:54:05] 
+INFO [2025-03-14 13:54:05] $cat.cex
+INFO [2025-03-14 13:54:05] [1] 1
+INFO [2025-03-14 13:54:05] 
+INFO [2025-03-14 13:54:05] $cex
+INFO [2025-03-14 13:54:05] [1] 1
+INFO [2025-03-14 13:54:05] 
+INFO [2025-03-14 13:54:05] $main
+INFO [2025-03-14 13:54:05] [1] "Significantly Differentially Expressed Gene Lists"
+INFO [2025-03-14 13:54:05] 
+INFO [2025-03-14 13:54:05] $main.cex
+INFO [2025-03-14 13:54:05] [1] 1.5
+INFO [2025-03-14 13:54:05] 
