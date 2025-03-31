@@ -1,5 +1,5 @@
 ---
-title: "updated_rnaseq_nov2024"
+title: "updated_rnaseq_march2025"
 author: "Paulameena Shultes"
 date: "2024-11-22"
 output: html_document
@@ -272,21 +272,21 @@ ego_rvp_MF <- enrichGO(gene = rvp_tab_siggenes$ensembl,
 
 ```
 
-```{r plot_fvr_GO, fig.width=6, fig.height=5}
+```{r plot_rvp_GO, fig.width=6, fig.height=5}
 barplot(ego_rvp_BP, showCategory=10, title="resistant vs parental biological processes")
 barplot(ego_rvp_CC, showCategory=10, title= "reistant vs parental cellular components")
 barplot(ego_rvp_MF, showCategory=10, title="resistant vs parental metabolic functions")
 ```
 
-# GSEA analysis
+# GSEA analysis (1st time)
 
-```{r, load_library_for_Gsea}
+```{r, load_library_for_Gsea, include=FALSE}
 library(msigdbr)
 
 ```
 
 ## rank gene sets by logFC
-```{r, rank_genesets}
+```{r, rank_genesets, include=FALSE}
 fvr_tab = fvr_tab %>% mutate(GeneID = fvr_tab$ensembl) 
 rankedGenes_fvr <- fvr_tab %>%
   filter(!is.na(GeneID)) %>%
@@ -310,7 +310,7 @@ rankedGenes_rvp <- rvp_tab %>%
 ```
 
 ## load pathways
-```{r}
+```{r, include=FALSE}
 term2gene <- msigdbr(species = "Homo sapiens", category = "H") %>% 
   dplyr::select(gs_name, ensembl_gene)
 term2name <- msigdbr(species = "Homo sapiens", category = "H") %>% 
@@ -320,7 +320,7 @@ term2name <- msigdbr(species = "Homo sapiens", category = "H") %>%
 ```
 
 ## perform GSEA analysis
-```{r, run_GSEA analysis}
+```{r, run_GSEA analysis, include=FALSE}
 gseaRes_fvr <- GSEA(rankedGenes_fvr,
                 TERM2GENE = term2gene,
                 TERM2NAME = term2name,
@@ -345,7 +345,7 @@ gseaRes_rvp <- GSEA(rankedGenes_rvp,
 #redo using GO BP as pathways (fgsea)
 ```
 
-```{r, examine_top_10_results_for_each}
+```{r, examine_top_10_results_for_each, include=FALSE}
 fusedvsresistant_GSEA = as_tibble(gseaRes_fvr) %>% 
   arrange(desc(abs(NES))) %>% 
   top_n(10, wt=-p.adjust) %>% 
@@ -402,7 +402,7 @@ fusedvsRandP_GSEA2
 fusedvsRandP_GSEA1
 
 ```
-```{r, save_gsea_results_for_publication}
+```{r, save_gsea_results_for_publication, include=FALSE}
 
 # Load libraries
 # library(officer)
@@ -489,7 +489,7 @@ fused_genes_of_interestFVR
 #grid.draw(venn.plot)
 ```
 
-```{r, parallel_volcano_plots_DEG}
+```{r, parallel_volcano_plots_DEG, include=FALSE}
 library(EnhancedVolcano)
 plot_volcano <- function(data, title = "Volcano Plot") {
   EnhancedVolcano(
@@ -552,7 +552,8 @@ for (i in seq_along(df_list)) {
 }
 
 ```
-```{r, heatmap of dge all}
+
+```{r, heatmap of dge all, include=FALSE}
 significant_genes <- test_res_all_tab[test_res_all_tab$PValue < 0.05, ]
 
 # Retrieve normalized counts for significant genes
@@ -580,6 +581,7 @@ pheatmap(heatmap_data,
 dev.off()
 
 ```
+
 ```{r, pub_alternative_to_heatmap}
 
 #Arda notes:
@@ -787,3 +789,93 @@ print(GSEA_geneset_strict)
 #don't intersect GSEA outputs, intersect leading edge gene lists between two "directions" of fvrandp (fvp vs rvp)
                      
 ```
+## REDO: rank gene sets by logFC & make sure genes are symbols not EnsemblIDs
+```{r, convert_to_symbol, include=FALSE}
+
+#library(org.Hs.eg.db)
+#fvr2symbol <- AnnotationDbi::select(org.Hs.eg.db,
+                                    #key=fvr_tab$ensembl, 
+                                    #columns="SYMBOL",
+                                   # keytype="ENSEMBL")
+#fvr2symbol <- as_tibble(fvr2symbol)
+#fvr2symbol
+
+#fvp2symbol <- AnnotationDbi::select(org.Hs.eg.db,
+                                  #  key=fvp_tab$ensembl, 
+                                  #  columns="SYMBOL",
+                                   # keytype="ENSEMBL")
+#fvp2symbol <- as_tibble(fvp2symbol)
+#fvp2symbol
+
+#rvp2symbol <- AnnotationDbi::select(org.Hs.eg.db,
+                                   # key=rvp_tab$ensembl, 
+                                   # columns="SYMBOL",
+                                   # keytype="ENSEMBL")
+#rvp2symbol <- as_tibble(rvp2symbol)
+#rvp2symbol
+```
+
+```{r, redo_fgsea}
+fvr_tab = fvr_tab %>% mutate(GeneID = fvr_tab$ensembl) 
+rankedGenes_fvr <- fvr_tab %>%
+  filter(!is.na(SYMBOL)) %>% 
+  mutate(rank = logFC) %>%
+  arrange(desc(rank)) %>%
+  pull(rank, SYMBOL)
+
+fvp_tab = fvp_tab %>% mutate(GeneID = fvp_tab$ensembl) 
+rankedGenes_fvp <- fvp_tab %>%
+  filter(!is.na(SYMBOL)) %>%
+  mutate(rank = logFC) %>%
+  arrange(desc(rank)) %>%
+  pull(rank, SYMBOL)
+
+rvp_tab = rvp_tab %>% mutate(GeneID = rvp_tab$ensembl) 
+rankedGenes_rvp <- rvp_tab %>%
+  filter(!is.na(SYMBOL)) %>%
+  mutate(rank = logFC) %>%
+  arrange(desc(rank)) %>%
+  pull(rank, SYMBOL)
+ 
+```
+
+```{r redo_GSEA_with_fgsea}
+
+#need to redo gsea with fgsea and GO BP pathways rather than just hallmarks
+
+library(msigdbr)
+library(fgsea)
+
+# Retrieve C5 gene sets
+c5_gene_sets <- msigdbr(species = "Homo sapiens", category = "C5") #c5 is all gene ontology terms
+
+#may be useful to do c6 as well so I'll grab those as well
+c6_gene_sets <- msigdbr(species="Homo sapiens", category="C6")
+
+bp_gene_sets <- c5_gene_sets[c5_gene_sets$gs_subcat == "BP", ]
+
+#format for fgsea analysis
+c5_pathways <- split(c5_gene_sets$gene_symbol, c5_gene_sets$gs_name)
+c6_pathways <- split(c6_gene_sets$gene_symbol, c6_gene_sets$gs_name)
+
+#ranked gene list by logFC is also needed; had generated above
+#rankedGenes_fvp
+#rankedGenes_fvr
+#rankedGenes_rvp
+
+#run fgsea analysis on all 3 sets and intersect leading edge lists
+fgsea_c5_fvp = fgsea(pathways = c5_pathways, stats = rankedGenes_fvp, minSize = 15, maxSize = 500) %>% sort_by(p.adjust)
+fgsea_c5_fvr = fgsea(pathways = c5_pathways, stats = rankedGenes_fvr, minSize = 15, maxSize = 500)
+fgsea_c5_rvp = fgsea(pathways = c5_pathways, stats = rankedGenes_rvp, minSize = 15, maxSize = 500)
+
+
+```
+#summary of gene set options (chatGPT generated)
+
+    C2: Curated gene sets, including pathway and drug response gene sets.
+    C3: Motif collection, which comprises gene sets defined by specific transcription factor binding motifs.
+    C4: Computational gene sets, including gene sets obtained from various computational approaches.
+    C5: Gene Ontology gene sets, which include Biological Processes, Cellular Components, and Molecular Functions.
+    C6: Oncogenic signatures, which include gene sets associated with cancer.
+    C7: Immunologic signature gene sets, which reflect immune responses.
+
