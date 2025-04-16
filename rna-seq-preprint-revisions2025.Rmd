@@ -1,0 +1,628 @@
+---
+title: "rna_seq_Arda_PVS_preprint_revisions2025"
+author: "Paulameena Shultes"
+date: "2025-04-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(data.table)
+library(dplyr)
+library(limma)
+library(edgeR)
+library(tximport)
+library(biomaRt)
+library(DESeq2)
+library(org.Hs.eg.db)
+library(ggplot2)
+library(scales)
+library(viridis)
+library(ggdendro)
+library(gridExtra)
+```
+
+
+
+```{r, arda_stuff}
+# # This script is used to clean, filter, normalize and run DEG
+# # analysis on the gene count data
+# 
+# setwd('/mnt/pan/SOM_CCCC_JGS25/durmaza/bulkrnaseq_fusion/RNASeq_Analysis/')
+# 
+# f_list <- list.files(path='RNA_SEQ/', pattern = 'quant.sf', recursive = TRUE, full.names = TRUE)
+# tx2_gene <- fread('/mnt/pan/SOM_CCCC_JGS25/durmaza/resources/grch38_gencodev42_tx2gene.tsv', header=FALSE, sep='\t') %>%
+#   filter(V1!='') %>%
+#   distinct(V1, V2, V3)
+# 
+# 
+# #### Check Abundance estimates ####
+# count_res <- tximport(f_list, 
+#                       type = 'salmon', 
+#                       txIn = TRUE, 
+#                       txOut = FALSE, 
+#                       countsFromAbundance = 'scaledTPM', 
+#                       tx2gene = data.frame('transcript_id'=tx2_gene$V2,
+#                                            'gene_id'=tx2_gene$V1),
+#                       infRepStat = matrixStats::rowMedians)
+
+count_mat <- read.csv("./rna_2_counts (1).csv")
+obs_ft <- read.csv("./obs_ft (1).csv")
+obs_ft <-  subset(obs_ft, select = -c(X) )
+rownames(count_mat) <- count_mat$X
+count_mat = subset(count_mat, select = -c(X) )
+f_list <- read.csv("./f_list.csv")
+tx2_gene <- read.csv("./tx2_gene (1).csv")
+tx2_gene = subset(tx2_gene, select = -c(X) )
+#colnames(count_mat) <- basename(gsub(pattern='/quant.sf', replacement = '', f_list))
+
+# Check Abundance #
+#tx2_gene <- tx2_gene[match(rownames(count_mat), table=tx2_gene$V1),]
+
+require(pheatmap)
+pheatmap(sapply(unique(tx2_gene$V3), function(s){
+  local_mapp <- subset(tx2_gene, tx2_gene$V3 == s)
+  local_count_mat <- count_mat[which(rownames(count_mat) %in% local_mapp$V1),,drop=FALSE]
+  log10(colSums(local_count_mat)+1)
+}))
+
+#count_mat <- count_mat[which(rownames(count_mat) %in% tx2_gene$V1[which(tx2_gene$V4 %in% c('protein_coding', 'lncRNA'))]),]
+count_mat <- count_mat[which(rownames(count_mat) %in% tx2_gene$V1[which(tx2_gene$V3 %in% c('protein_coding', 'lncRNA', 'snRNA', 'snoRNA', 'miRNA'))]),]
+
+design_mat <- model.matrix(~0+obs_ft$tag)
+dge <- DGEList(counts = count_mat)
+dge <- dge[filterByExpr(dge, design=design_mat),]
+dge <- calcNormFactors(dge, method='TMM', logratioTrim = 0.15, sumTrim = 0.025)
+
+dge <- estimateGLMRobustDisp(dge, design=design_mat)
+fit_res <- glmQLFit(dge, design_mat) #switched to qlfit to be less permissive
+test_res_all = glmQLFTest(fit_res)
+test_res_all_tab = topTags(test_res_all, n=Inf, adjust.method = 'BY', sort.by = 'none')$table #updated correction
+test_res_all_tab$symbol <- tx2_gene$V3[match(rownames(test_res_all_tab), table=tx2_gene$V1)]
+
+test_res <- glmQLFTest(fit_res, contrast = c(0,-1,1))
+test_res_tab <- topTags(test_res, n=Inf, adjust.method = 'fdr', sort.by = 'none')$table
+test_res_tab$symbol <- tx2_gene$V3[match(rownames(test_res_tab), table=tx2_gene$V1)]
+hist(test_res_tab$PValue)
+plot(test_res_tab$logFC, -log10(test_res_tab$FDR))
+
+test_res_tab$symbol
+View(test_res_tab)
+
+```
+## get normalized genes from DGEobject in EdgeR for preprint
+```{r, heatmap of dge all, include=TRUE}
+
+# Retrieve normalized counts for all genes from DGEobject
+normalized_counts <- cpm(dge, normalized.lib.sizes = TRUE, log=TRUE) #q: should log-TRUE as well? I think yes
+
+#rename_dict <- c("Quant_RNA_Seq_S1 " = "Parental1", Quant_RNA_Seq_S2 = "Fused1", Quant_RNA_Seq_S3 = "Fused2", Quant_RNA_Seq_S4 = "Parental2", Quant_RNA_Seq_S5 = "Resistant1", Quant_RNA_Seq_S6 = "Fused3", Quant_RNA_Seq_S7 = "Parental3", Quant_RNA_Seq_S8 = "Resistant2", Quant_RNA_Seq_S9 = "Resistant3")
+
+colnames(normalized_counts) = c("Parental1", "Fused1", "Fused2", "Parental2", "Resistant1", "Fused3", "Parental3", "Resistant2", "Resistant3")
+#names(normalized_counts) <- rename_dict[names(normalized_counts)]
+df_groups = DataFrame(cols = colnames(normalized_counts), group= c("Parental", "Fused", "Fused", "Parental", "Resistant", "Fused", "Parental", "Resistant", "Resistant"))
+
+heatmap_data <- normalized_counts[rownames(normalized_counts) %in% rownames(significant_genes), ]
+
+
+# Generate the heatmap
+#png("heatmap-deg.png", width = 800, height = 600)
+#pheatmap(heatmap_data, 
+   #      cluster_rows = TRUE, 
+    #     cluster_cols = TRUE,
+    #     treeheight_row = 00,
+    #     treeheight_col = 00,
+    #     show_rownames = FALSE,
+    #     border_color = NA,
+     #    scale = "row", 
+     #    main = "Significantly Differentially Expressed Genes With PValue < 0.05",
+     #    fontsize = 14)
+#dev.off()
+
+```
+## REVISIONS for PREPRINT -- used normalized counts generated in previous chunk
+
+```{r, pub_alternative_to_heatmap}
+
+#Arda notes:
+#yes, but if your primary aim is to just show that groups are similar/dissimilar without focusing on the genes, you can even remove the heatmap and just plot a 2d pca plot and color the groups,
+#
+#dont want to add much to your plate but another idea would be to show the 2d pca and add a 'pathway' activity heatmap using gsva or something similar?
+
+#PCA plot on significantly differentially expressed genes only
+
+# Perform PCA
+#scale data first though
+scaled_norm_data = scale(normalized_counts) #to maintain reproducibility it required me to not scale the TRANSPOSE if I've log'ed it already , but can still scale by sample rather than by gene
+#pca_result <- prcomp(t(scaled_norm_data))
+#Arda saves me when it comes to scaling cuz confused
+pca_result = prcomp(scale(t(normalized_counts)), center=FALSE, scale.=FALSE)
+# Plot PCA
+pca_data <- data.frame(pca_result$x[, 1:2])  # Get the first two principal components
+colnames(pca_data) <- c("PC1", "PC2")
+pca_data$Group <- df_groups$group
+
+# Basic PCA plot
+plot(pca_data$PC1, pca_data$PC2, xlab = "PC1", ylab = "PC2", main = "PCA Plot", col = as.factor(pca_data$Group))
+legend("topright", legend = unique(pca_data$Group), col = unique(as.factor(pca_data$Group)), pch = 19)
+
+```
+
+```{r more_PCA_things_from_Arda}
+
+#you might want to also include the variance explained per component and investigate the feature/gene loadings on each component
+
+#chatGPT is helping me translate this into code...
+
+# Variance explained
+variance_explained <- pca_result$sdev^2 / sum(pca_result$sdev^2) * 100
+
+# Base R Plot
+plot(pca_result$x[, 1:2], 
+     xlab = paste("PC1 (", round(variance_explained[1], 2), "%)", sep = ""),
+     ylab = paste("PC2 (", round(variance_explained[2], 2), "%)", sep = ""),
+     main = "PCA Plot")
+
+# Using ggplot2
+library(ggplot2)
+pca_data <- as.data.frame(pca_result$x)
+pca_data$label <- rownames(pca_data)  # Add labels if necessary
+
+ggplot(pca_data, aes(x = PC1, y = PC2, label = label)) +
+  geom_point() +
+  geom_text(vjust = 1.5) +
+  xlab(paste("PC1 (", round(variance_explained[1], 2), "%)", sep = "")) +
+  ylab(paste("PC2 (", round(variance_explained[2], 2), "%)", sep = "")) +
+  ggtitle("PCA Plot")
+
+# Loadings
+loadings <- pca_result$rotation
+
+# Biplot
+biplot(pca_result)
+
+loadings_data <- as.data.frame(loadings)
+loadings_data$Feature <- rownames(loadings_data)
+
+ggplot(loadings_data, aes(x = PC1, y = PC2, label = Feature)) +
+  geom_text() +
+  theme_minimal() +
+  ggtitle("PCA Loadings Plot")
+
+```
+
+```{r improve_interpretability_of_loadings}
+
+#Arda suggestions (similar to ChatGPT suggestions also)
+
+#first start with top 50-100 genes and/or plot the loadings and see if there are any changes in the slopes, like elbow plots
+
+#using chatGPT for outline again:
+
+#data <- scale(normalized_counts)  # Scale your data if necessary
+#pca_result <- prcomp(data, center = TRUE, scale. = TRUE)
+
+# Variance explained
+variance_explained <- pca_result$sdev^2 / sum(pca_result$sdev^2)
+cumulative_variance <- cumsum(variance_explained)
+
+# Create a data frame for plotting
+variance_data <- data.frame(
+    Component = 1:length(variance_explained),
+    Variance = variance_explained,
+    Cumulative = cumulative_variance
+)
+
+# Using ggplot2 to create the elbow plot
+library(ggplot2)
+
+ggplot(variance_data, aes(x = Component)) +
+  geom_line(aes(y = Variance), color = "blue", size = 1) +
+  geom_point(aes(y = Variance), color = "blue") +
+  geom_line(aes(y = Cumulative), color = "red", size = 1) +
+  geom_point(aes(y = Cumulative), color = "red") +
+  labs(x = "Principal Components",
+       y = "Variance Explained",
+       title = "Elbow Plot of PCA Loadings") +
+  theme_minimal() +
+  scale_y_continuous(sec.axis = sec_axis(~ ., name = "Cumulative Variance Explained"))
+
+
+#result -- chatGPT helped me create an elbow plot for the number of principal components...which can be useful but not really what I intended
+
+#looks like 2-3 PCs is appropriate though based on individual variance or 7 based on cumulative variance approaching 1
+
+#will now try again with loading components instead oop
+
+#post lab-meeting -- looks like vast majority of variance is in PC1 so for simplicity/reducing number of genes of interest, will just look at PC1
+```
+
+```{r PCA_gene_loadings_just_PC1_attempt1_chatgpt}
+
+#ChatGPT to the rescue for helping me set this up again!
+
+loadings <- pca_result$rotation
+loadings_PC1 <- loadings[, 1]
+
+#get absolute value so can rank independent of pos. or neg. correlation terms
+abs_loadings_PC1 <- abs(loadings_PC1)
+
+#organize loading data by gene_name
+abs_loading_data <- data.frame(
+    Gene = rownames(loadings),
+    Loading_PC1 = abs_loadings_PC1)
+
+orig_loading_data <- data.frame(
+    Gene = rownames(loadings),
+    Loading_PC1 = loadings_PC1)
+
+# Sort the loadings for PC1
+loading_PC1_sorted <- abs_loading_data[order(-abs_loading_data$Loading_PC1), ]
+
+# Cumulative sum of sorted loadings
+loading_PC1_cumsum <- cumsum(loading_PC1_sorted$Loading_PC1) #get total variance again from PC1 only
+loading_PC1_cumsum <- loading_PC1_cumsum / max(loading_PC1_cumsum)  # Normalize by overall variance of PC1
+
+# Create the elbow plot for PC1
+ggplot(data = data.frame(Index = 1:nrow(loading_PC1_sorted),
+                          CumulativeVariance = loading_PC1_cumsum), 
+       aes(x = Index, y = CumulativeVariance)) +
+  geom_line(color = "blue", size = 1) +
+  geom_point(color = "blue") +
+  labs(x = "Ranked Genes by Absolute Loadings (PC1)",
+       y = "Cumulative Variance Explained (Normalized)",
+       title = "Elbow Plot for Gene Loadings - PC1") +
+  theme_minimal()
+
+#seems to flatten around 19-20,000 that's still so many!!! but okay
+
+
+# Create the elbow plot for PC1
+ggplot(data = data.frame(Index = 1:nrow(loading_PC1_sorted),
+                         Loadings = loading_PC1_sorted$Loading_PC1),
+       aes(x = Index, y = Loadings)) +
+  geom_point(color = "blue") +
+  labs(x = "Ranked Genes by Absolute Loadings (PC1)",
+       y = "Individual (Abs) Loading Values of PC1",
+       title = "Elbow Plot for Gene Loadings - PC1") +
+  theme_minimal()
+
+#need to grab top 10000 genes and then grab loadings (not absolute values) to look at distribution across positive and negative
+top10000genes= loading_PC1_sorted[0:10000, ]
+
+distrib_loadings = orig_loading_data %>% filter(Gene %in% top10000genes$Gene)
+
+#plot distrib of loadings
+# Create the elbow plot for PC1
+hist(distrib_loadings$Loading_PC1)
+
+```
+
+
+
+
+
+
+
+```{r compare_to_GSEA_analysis, include=FALSE}
+#when I did GSEA analysis I had two slightly different results depending on if I combined fused vs resitant with fused vs parental or vice versa (the order of the combinations mattered for some reason)
+
+library(fgsea)
+
+overlap_GSEA_fvrandp_pathways = intersect(fusedvsRandP_GSEA1$ID, fusedvsRandP_GSEA2$ID)
+
+merge_GSEA_fvrp = merge(fusedvsRandP_GSEA1, fusedvsRandP_GSEA2, by="ID") 
+
+merge_GSEA_fvrp$p.adjust.x<-as.double(merge_GSEA_fvrp$p.adjust.x)
+merge_GSEA_fvrp$p.adjust.y<- as.double(merge_GSEA_fvrp$p.adjust.y)
+
+merge_GSEA_fvrp_signifance_thresholded = merge_GSEA_fvrp %>% filter(p.adjust.x <= .05) %>% filter(p.adjust.y <= .05) %>% arrange(NES.x)
+
+merge_GSEA_fvrp_signifance_thresholded
+
+
+library(org.Hs.eg.db)
+
+GSEA_geneset_strict = merge_GSEA_fvrp_signifance_thresholded$leading_edge.x[1]
+
+print(GSEA_geneset_strict)
+
+#don't intersect GSEA outputs, intersect leading edge gene lists between two "directions" of fvrandp (fvp vs rvp)
+                     
+```
+## REDO: rank gene sets by logFC & make sure genes are symbols not EnsemblIDs
+```{r, convert_to_symbol, include=FALSE}
+
+#library(org.Hs.eg.db)
+#fvr2symbol <- AnnotationDbi::select(org.Hs.eg.db,
+                                    #key=fvr_tab$ensembl, 
+                                    #columns="SYMBOL",
+                                   # keytype="ENSEMBL")
+#fvr2symbol <- as_tibble(fvr2symbol)
+#fvr2symbol
+
+#fvp2symbol <- AnnotationDbi::select(org.Hs.eg.db,
+                                  #  key=fvp_tab$ensembl, 
+                                  #  columns="SYMBOL",
+                                   # keytype="ENSEMBL")
+#fvp2symbol <- as_tibble(fvp2symbol)
+#fvp2symbol
+
+#rvp2symbol <- AnnotationDbi::select(org.Hs.eg.db,
+                                   # key=rvp_tab$ensembl, 
+                                   # columns="SYMBOL",
+                                   # keytype="ENSEMBL")
+#rvp2symbol <- as_tibble(rvp2symbol)
+#rvp2symbol
+```
+
+```{r, redo_fgsea}
+fvr_tab = fvr_tab %>% mutate(GeneID = fvr_tab$ensembl) 
+rankedGenes_fvr <- fvr_tab %>%
+  filter(!is.na(SYMBOL)) %>% 
+  mutate(rank = logFC) %>%
+  arrange(desc(rank)) %>%
+  pull(rank, SYMBOL)
+
+fvp_tab = fvp_tab %>% mutate(GeneID = fvp_tab$ensembl) 
+rankedGenes_fvp <- fvp_tab %>%
+  filter(!is.na(SYMBOL)) %>%
+  mutate(rank = logFC) %>%
+  arrange(desc(rank)) %>%
+  pull(rank, SYMBOL)
+
+rvp_tab = rvp_tab %>% mutate(GeneID = rvp_tab$ensembl) 
+rankedGenes_rvp <- rvp_tab %>%
+  filter(!is.na(SYMBOL)) %>%
+  mutate(rank = logFC) %>%
+  arrange(desc(rank)) %>%
+  pull(rank, SYMBOL)
+ 
+```
+
+```{r, redo_fgsea_ensembls}
+fvr_tab = fvr_tab %>% mutate(GeneID = fvr_tab$ensembl) 
+rankedGenes_fvr_ensembl <- fvr_tab %>%
+  filter(!is.na(GeneID)) %>% 
+  mutate(rank = logFC) %>%
+  arrange(desc(rank)) %>%
+  pull(rank, GeneID)
+
+fvp_tab = fvp_tab %>% mutate(GeneID = fvp_tab$ensembl) 
+rankedGenes_fvp_ensembl <- fvp_tab %>%
+  filter(!is.na(GeneID)) %>%
+  mutate(rank = logFC) %>%
+  arrange(desc(rank)) %>%
+  pull(rank, GeneID)
+
+rvp_tab = rvp_tab %>% mutate(GeneID = rvp_tab$ensembl) 
+rankedGenes_rvp_ensembl <- rvp_tab %>%
+  filter(!is.na(GeneID)) %>%
+  mutate(rank = logFC) %>%
+  arrange(desc(rank)) %>%
+  pull(rank, GeneID)
+ 
+```
+
+```{r redo_GSEA_with_fgsea_ensembls}
+
+#need to redo gsea with fgsea and GO BP pathways rather than just hallmarks
+library(msigdbr)
+library(fgsea)
+
+# Retrieve C5 gene sets
+c5_gene_sets <- msigdbr(species = "Homo sapiens", category = "C5") #c5 is all gene ontology terms
+
+#may be useful to do c6 as well so I'll grab those as well
+c6_gene_sets <- msigdbr(species="Homo sapiens", category="C6")
+
+bp_gene_sets <- c5_gene_sets[c5_gene_sets$gs_subcat == "BP", ]
+
+#format for fgsea analysis
+c5_pathways_ensembls <- split(c5_gene_sets$db_ensembl_gene, c5_gene_sets$gs_name)
+c6_pathway_ensembls <- split(c6_gene_sets$db_ensembl_gene, c6_gene_sets$gs_name)
+
+#ranked gene list by logFC is also needed; had generated above
+#rankedGenes_fvp
+#rankedGenes_fvr
+#rankedGenes_rvp
+
+#run fgsea analysis on all 3 sets and intersect leading edge lists
+fgsea_c5_fvp_e = fgsea(pathways = c5_pathways_ensembls, stats = rankedGenes_fvp_ensembl, minSize = 15, maxSize = 500) %>% arrange(padj)
+fgsea_c5_fvr_e = fgsea(pathways = c5_pathways_ensembls, stats = rankedGenes_fvr_ensembl, minSize = 15, maxSize = 500) %>% arrange(padj)
+fgsea_c5_rvp_e = fgsea(pathways = c5_pathways_ensembls, stats = rankedGenes_rvp_ensembl, minSize = 15, maxSize = 500) %>% arrange(padj)
+
+```
+#summary of gene set options (chatGPT generated)
+
+    C2: Curated gene sets, including pathway and drug response gene sets.
+    C3: Motif collection, which comprises gene sets defined by specific transcription factor binding motifs.
+    C4: Computational gene sets, including gene sets obtained from various computational approaches.
+    C5: Gene Ontology gene sets, which include Biological Processes, Cellular Components, and Molecular Functions.
+    C6: Oncogenic signatures, which include gene sets associated with cancer.
+    C7: Immunologic signature gene sets, which reflect immune responses.
+
+```{r, filter_c5_fgsea_results}`
+fgsea_c5_fvp_sig = fgsea_c5_fvp %>% filter(padj < 0.05)
+fgsea_c5_fvr_sig = fgsea_c5_fvr %>% filter(padj < 0.05)
+fgsea_c5_rvp_sig = fgsea_c5_rvp %>% filter(padj<0.05)
+
+
+fgsea_c5_fvp_genes = unique(unlist(fgsea_c5_fvp_sig$leadingEdge))
+fgsea_c5_fvr_genes = unique(unlist(fgsea_c5_fvr_sig$leadingEdge))
+#skipping rvp because had no significant results
+
+fgsea_c5_genes_intersect = intersect(fgsea_c5_fvp_genes, fgsea_c5_fvr_genes) #only one gene here oop; it's KCNJ8
+fgsea_c5_genes_union = unique(union(fgsea_c5_fvp_genes, fgsea_c5_fvr_genes)) #union gave 931 genes which is a good number I think
+
+#intersect union with top 10000 genes from earlier...
+#first need to convert ensemblIDs to symbol names eek
+#ensembl = sub('\\.[0-9]*$', '', top10000genes$Gene)
+top10000genes = top10000genes %>% mutate(ensembl = sub('\\.[0-9]*$', '', Gene))
+gene_annots_top10000 <- AnnotationDbi:: select(org.Hs.eg.db, keys=top10000genes$ensembl, 
+                columns="SYMBOL", keytype="ENSEMBL", multiVals="first")
+top10000genes_symbols = drop_na(merge.data.frame(top10000genes, gene_annots_top10000, by.x = "ensembl", by.y="ENSEMBL")) #dropped NA values on merge -- lost many values oof current count of genes = 62750
+
+
+#now check intersect
+genes_in_common_c5 = intersect(fgsea_c5_genes_union, top10000genes_symbols$SYMBOL) #only 148 genes in common
+
+top10000genes_symbols_in_common = top10000genes_symbols %>% filter(SYMBOL %in% genes_in_common_c5) 
+
+fvr_logFC = fvr_tab %>% filter(SYMBOL %in% top10000genes_symbols$SYMBOL) 
+#heatmap of differential gene expressions for those genes
+
+#update: talking to Arda, decided the loss of information using SYMBOL is less than ideal so will rerun fgsea using ensemblIDs instead!
+
+#sanity check for no significant fgsea results -- Pearsons correlation of NES terms to confirm expression patterns are the same (up or down)
+
+#heatmap of leading edge gene sets
+```
+```{r, filter_c5_fgsea_results_ensembl}
+fgsea_c5_fvp_sig = fgsea_c5_fvp_e %>% filter(padj < 0.05)
+fgsea_c5_fvr_sig = fgsea_c5_fvr_e %>% filter(padj < 0.05)
+fgsea_c5_rvp_sig = fgsea_c5_rvp_e %>% filter(padj<0.05)
+
+
+fgsea_c5_fvp_genes = unique(unlist(fgsea_c5_fvp_sig$leadingEdge))
+fgsea_c5_fvr_genes = unique(unlist(fgsea_c5_fvr_sig$leadingEdge))
+#skipping rvp because had no significant results
+
+fgsea_c5_genes_intersect = intersect(fgsea_c5_fvp_genes, fgsea_c5_fvr_genes) #only one gene here oop; it's KCNJ8
+fgsea_c5_genes_union = unique(union(fgsea_c5_fvp_genes, fgsea_c5_fvr_genes)) #union gave 931 genes which is a good number I think
+
+#intersect union with top 10000 genes from earlier...
+#first need to convert ensemblIDs to symbol names eek
+#ensembl = sub('\\.[0-9]*$', '', top10000genes$Gene)
+top10000genes = top10000genes %>% mutate(ensembl = sub('\\.[0-9]*$', '', Gene))
+gene_annots_top10000 <- AnnotationDbi:: select(org.Hs.eg.db, keys=top10000genes$ensembl, 
+                columns="SYMBOL", keytype="ENSEMBL", multiVals="first")
+top10000genes_symbols = merge.data.frame(top10000genes, gene_annots_top10000, by.x = "ensembl", by.y="ENSEMBL") #dropped NA values on merge -- lost many values oof current count of genes = 62750
+
+
+#now check intersect
+genes_in_common_c5 = intersect(fgsea_c5_genes_union, top10000genes$ensembl) #only 112 genes in common
+
+top10000genes_ensembl_in_common = top10000genes_symbols %>% filter(ensembl %in% genes_in_common_c5) 
+
+fvr_logFC_ofinterest = fvr_tab %>% filter(ensembl %in% top10000genes_ensembl_in_common$ensembl) 
+fvp_logFC_ofinterest = fvp_tab %>% filter(ensembl %in% top10000genes_ensembl_in_common$ensembl)
+#heatmap of differential gene expressions for those genes
+
+#note some are not statistically significant...? could potentially filter again by p/padjust 
+
+#curiosity check: updated volcano plots
+
+ggplot(fvr_logFC_ofinterest, aes(x=logFC, y=-log(PValue))) +
+  geom_point(alpha=0.5) +
+  theme_minimal() +
+  labs(title="Volcano Plot of Fused vs Resistant Genes of Interest", x="Log2 Fold Change", y="-Log10 P-value") +
+  geom_hline(yintercept=1.3, linetype="dashed", color="red") + # Adjust threshold for significance
+  geom_vline(xintercept=c(-1, 1), linetype="dashed", color="red") +  # Adjust thresholds for fold change 
+  geom_text(data=fvr_logFC_ofinterest, aes(label=SYMBOL), vjust=-0.5, size=3)
+
+ggplot(fvp_logFC_ofinterest, aes(x=logFC, y=-log(PValue))) +
+  geom_point(alpha=0.5) +
+  theme_minimal() +
+  labs(title="Volcano Plot of Fused vs Parental Genes of Interest", x="Log2 Fold Change", y="-Log10 P-value") +
+  geom_hline(yintercept=1.3, linetype="dashed", color="red") + # Adjust threshold for significance
+  geom_vline(xintercept=c(-1, 1), linetype="dashed", color="red") +  # Adjust thresholds for fold change
+  geom_text(data=fvp_logFC_ofinterest, aes(label=SYMBOL), vjust=-0.5, size=3)
+
+#if I want to do a heatmap of them it should be counts (normalized probably) by sample (so select them from OG counts_matrix) basically
+
+#sanity check for no significant fgsea results rvp... -- Pearsons correlation of NES terms to confirm expression patterns are the same (up or down)
+
+#heatmap of leading edge gene sets
+```
+
+```{r, heatmap_genes_of_interest}
+
+#rownames(normalized_counts)
+ensembls = sub('\\.[0-9]*$', '', rownames(normalized_counts))
+#ensembls
+#ensembls2 = list(ensembls)
+#for (i in range(dim(ensembls2) )){
+ # item = ensembls2[i]
+ ## item = toString(item)
+ # ensembls2[i] = item
+#}
+
+norm_counts_filtered = data.frame(normalized_counts)
+#rownames(norm_counts_filtered) = ensembls
+norm_counts_filtered = norm_counts_filtered %>% mutate(ids = ensembls)  
+
+top10000genes_ensembl_in_common_df = data.frame(top10000genes_ensembl_in_common)
+for (i in range(dim(top10000genes_ensembl_in_common_df$ensembl) )){
+  item = top10000genes_ensembl_in_common_df$ensembl[i]
+  item = toString(item)
+  top10000genes_ensembl_in_common_df$ensembl[i] = item
+}
+norm_counts_select= left_join(top10000genes_ensembl_in_common_df, norm_counts_filtered, by= join_by(ensembl == ids)) 
+cols_of_interest = c("SYMBOL","Parental1", "Parental2", "Parental3", "Resistant1", "Resistant2", "Resistant3", "Fused1", "Fused2", "Fused3" )
+
+heatmap_cols = unique(norm_counts_select[cols_of_interest]) 
+keep = heatmap_cols$SYMBOL
+heatmap_cols_keep = subset(heatmap_cols, select=-SYMBOL)
+rownames(heatmap_cols) = keep
+#class(top10000genes_ensembl_in_common_df$ensembl)
+#class(norm_counts_filtered$ids[1])
+
+```
+
+```{r, make_another_heatmap}
+library(pheatmap)
+pheatmap(heatmap_cols_keep,
+         scale = "row",          # Scale the rows (genes)
+         clustering_distance_rows = "euclidean",
+         clustering_distance_cols = "euclidean",
+         clustering_method = "complete",
+         show_rownames = TRUE,   # Show gene names
+         show_colnames = TRUE)    # Show sample names
+
+
+library(ComplexHeatmap)
+
+#Heatmap(heatmap_cols)
+library(circlize)
+#col_fun = colorRamp2(seq(-expr_thr, expr_thr, 0.01), colors = colorRampPalette(c('dodgerblue', 'white', 'firebrick'))(length(seq(-expr_thr, expr_thr,0.01))))
+
+
+#heatmap_matrix = data.matrix(heatmap_cols_keep)
+
+#keep getting a data needs to be a matrix error so let me try to do it manually
+
+mat = data.matrix(heatmap_cols_keep)
+rows = rownames(heatmap_cols)
+rownames(mat) = rows
+
+mat_scaled = t(scale(t(mat)))
+col_fun = colorRamp2(seq(-3, 3, .01), colors = colorRampPalette(c('dodgerblue', 'white', 'firebrick'))(length(seq(-3, 3, 0.01))))
+h <- Heatmap(mat_scaled,
+             col = col_fun,
+             cluster_rows = TRUE,
+             cluster_columns = TRUE,
+             show_column_dend = FALSE,
+             show_row_dend = FALSE,
+             row_labels = rows,
+             column_names_gp = gpar(fontsize=10),
+             row_names_gp = gpar(fontsize=6),
+             heatmap_legend_param = list(title = 'Leading Edge / PC1 genes of interest',
+                                         title_position='leftcenter-rot',
+                                         legend_height=unit(4,'cm')),
+             show_heatmap_legend = TRUE,
+             use_raster = FALSE,
+             border=TRUE)
+             #right_annotation = rowAnnot)
+             #column_split = data.frame('Group'=factor(expr_obs$treat[match(colnames(plot_mat), table=expr_obs$id)], levels=c('C', 'R')),
+                  #                     'Cycle'=expr_obs$cycle[match(colnames(plot_mat), #table=expr_obs$id)]),
+            # cluster_column_slices = FALSE)"
+
+```
+
+
+```{r, see_heatmap}
+draw(h)
+#scales are skewed because they are not log scale so goes from 0 to 300 -- log values then color by appropriate scale
+
+#note, went back and changed normalized counts to be log scale which helped a bit, also need to scale the values by row (observation) --> added line above (now mat_scaled) and re-ran
